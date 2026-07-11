@@ -1,6 +1,6 @@
 # Extension Build Process
 
-This document describes the build process for the IndigoPay Companion browser extension for both Chrome Web Store and Firefox Add-ons.
+This document describes the build process for the Stellar-IndigoPay Companion browser extension for both Chrome Web Store and Firefox Add-ons.
 
 ## Table of Contents
 

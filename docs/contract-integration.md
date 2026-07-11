@@ -1,6 +1,6 @@
-# IndigoPay Smart Contract Integration Guide
+# Stellar-IndigoPay Smart Contract Integration Guide
 
-This guide enables third-party developers to integrate with the **IndigoPay Donation Contract** on Stellar Soroban. You can record donations from your own contracts, query donor statistics, and leverage badge tiers in your dApps.
+This guide enables third-party developers to integrate with the **Stellar-IndigoPay Donation Contract** on Stellar Soroban. You can record donations from your own contracts, query donor statistics, and leverage badge tiers in your dApps.
 
 **Table of Contents**
 - [Overview](#overview)
@@ -18,18 +18,18 @@ This guide enables third-party developers to integrate with the **IndigoPay Dona
 
 ## Overview
 
-The IndigoPay contract is a **climate donation tracking system** on Stellar Soroban that:
+The Stellar-IndigoPay contract is a **climate donation tracking system** on Stellar Soroban that:
 
 - **Records donations** immutably on-chain with project, donor, and amount
 - **Calculates donor badges** based on cumulative lifetime donations
 - **Tracks CO₂ impact** per donation using project-specific offsets
-- **Enables cross-contract calls** so your contracts can integrate with IndigoPay
+- **Enables cross-contract calls** so your contracts can integrate with Stellar-IndigoPay
 
 Your contract can:
 1. Call `donate()` to record a climate donation on behalf of your users
 2. Query `get_donor_stats()` to show a donor's impact and badge tier
 3. Emit events when donations are recorded
-4. Build impact-driven features on top of IndigoPay data
+4. Build impact-driven features on top of Stellar-IndigoPay data
 
 ### Key Advantage
 
@@ -102,7 +102,7 @@ Represents donor impact level based on cumulative donations.
 
 ### Step 1: Understand the `donate()` Function
 
-The IndigoPay contract's `donate()` function records a donation and transfers XLM to the project wallet.
+The Stellar-IndigoPay contract's `donate()` function records a donation and transfers XLM to the project wallet.
 
 **Signature:**
 ```rust
@@ -131,7 +131,7 @@ pub fn donate(
 
 ### Step 2: Call from Your Soroban Contract
 
-If you're building a **Soroban contract** that integrates with IndigoPay, here's how to invoke `donate()`:
+If you're building a **Soroban contract** that integrates with Stellar-IndigoPay, here's how to invoke `donate()`:
 
 ```rust
 // In your contract's Rust code:
@@ -147,10 +147,10 @@ impl YourContract {
         amount: i128,
         msg_hash: u32,
     ) {
-        // Create a client to the IndigoPay contract
+        // Create a client to the Stellar-IndigoPay contract
         let indigopay_client = ContractClient::new(&env, &indigopay_contract_id);
         
-        // Call donate() on IndigoPay
+        // Call donate() on Stellar-IndigoPay
         // The donor must have authorized this transaction
         indigopay_client.donate(
             &token_address,     // XLM token contract address
@@ -184,7 +184,7 @@ Returns the donor's cumulative statistics, including their current badge tier.
 import { rpc, Contract, Address } from "@stellar/stellar-sdk";
 
 const rpcServer = new rpc.Server("https://soroban-testnet.stellar.org");
-const contractId = "CABC..."; // Your IndigoPay contract ID
+const contractId = "CABC..."; // Your Stellar-IndigoPay contract ID
 
 async function getDonorStats(donorPublicKey: string): Promise<any> {
   const contract = new Contract(contractId);
@@ -335,7 +335,7 @@ async function displayDonorImpact(donorPublicKey: string) {
 
 ### Example 1: Basic Donation via TypeScript
 
-Call the IndigoPay contract's `donate()` function from TypeScript to record a donation.
+Call the Stellar-IndigoPay contract's `donate()` function from TypeScript to record a donation.
 
 ```typescript
 import {
@@ -353,14 +353,14 @@ const NETWORK_PASSPHRASE = Networks.TESTNET_NETWORK_PASSPHRASE;
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const HORIZON_URL = "https://horizon-testnet.stellar.org";
 
-const CONTRACT_ID = "CABC..."; // Your IndigoPay contract ID
+const CONTRACT_ID = "CABC..."; // Your Stellar-IndigoPay contract ID
 const TOKEN_ADDRESS = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"; // Native XLM token
 
 const horizonServer = new Horizon.Server(HORIZON_URL);
 const rpcServer = new rpc.Server(RPC_URL);
 
 /**
- * Record a donation from a donor to a project via the IndigoPay contract.
+ * Record a donation from a donor to a project via the Stellar-IndigoPay contract.
  * 
  * @param donorPublicKey - Donor's public key (must have funds)
  * @param projectId - Target project ID (e.g., "amazon-reforestation")
@@ -457,7 +457,7 @@ Retrieve and display a donor's statistics and badge tier.
 
 ```typescript
 /**
- * Query the IndigoPay contract for a donor's stats.
+ * Query the Stellar-IndigoPay contract for a donor's stats.
  * 
  * @param donorPublicKey - Donor's public key
  * @returns Donor stats including badge tier
@@ -620,20 +620,18 @@ async function simulateContractCall(
 
 ## Complete Soroban Contract Example
 
-Here's a **full example Soroban contract** that integrates with IndigoPay to record donations:
+Here's a **full example Soroban contract** that integrates with Stellar-IndigoPay to record donations:
 
 ```rust
 // File: contracts/example-partner-contract/src/lib.rs
-// This contract partners with IndigoPay to record climate donations
+// This contract partners with Stellar-IndigoPay to record climate donations
 
 #![no_std]
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, token,
     Address, Env, String, Vec,
-};
-
-/// Track a match: when a user donates X, we donate Y to IndigoPay
+};    /// Track a match: when a user donates X, we donate Y to Stellar-IndigoPay
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct MatchOffer {
@@ -689,7 +687,7 @@ impl PartnerContract {
         env.storage().instance().set(&DataKey::Offer(offer_id), &offer);
     }
 
-    /// User donates; we match their donation and record both donations to IndigoPay
+    /// User donates; we match their donation and record both donations to Stellar-IndigoPay
     pub fn donate_with_match(
         env: Env,
         token: Address,
@@ -712,10 +710,10 @@ impl PartnerContract {
         // Calculate our match contribution
         let our_match = (donation_amount / 100) * (offer.match_ratio as i128);
 
-        // Record user's donation to IndigoPay
+        // Record user's donation to Stellar-IndigoPay
         let indigopay_client = token::Client::new(&env, &indigopay_contract);
         
-        // Invoke IndigoPay's donate() function
+        // Invoke Stellar-IndigoPay's donate() function
         // In a real contract, you'd use the contract client:
         let contract = soroban_sdk::Contract::new(&env, &indigopay_contract);
         contract.call(
@@ -941,7 +939,7 @@ A: Start with **Stellar Testnet**. Deploy to Mainnet after thorough testing.
 **Q: Can I integrate with non-Soroban contracts (Classic Stellar)?**
 A: Not directly via on-chain calls. You'd need to submit transactions from the frontend and use the REST API `/api/donations` endpoint.
 
-**Q: How do I deploy the IndigoPay contract myself?**
+**Q: How do I deploy the Stellar-IndigoPay contract myself?**
 A: See [contracts/indigopay-contract/README.md](../contracts/indigopay-contract/README.md).
 
 ---
@@ -952,9 +950,9 @@ A: See [contracts/indigopay-contract/README.md](../contracts/indigopay-contract/
 - **Frontend Integration**: [frontend/lib/stellar.ts](../frontend/lib/stellar.ts)
 - **Soroban Docs**: https://developers.stellar.org/soroban
 - **Stellar SDK**: https://github.com/stellar/js-stellar-sdk
-- **IndigoPay Issues**: https://github.com/your-org/stellar-indigopay/issues
+- **Stellar-IndigoPay Issues**: https://github.com/Stellar-IndigoPay/Stellar-IndigoPay/issues
 
 ---
 
 **Last Updated**: June 2026  
-**Maintainers**: IndigoPay Core Team
+**Maintainers**: Stellar-IndigoPay Core Team

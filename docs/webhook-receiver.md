@@ -1,4 +1,4 @@
-# IndigoPay Webhook Receiver Guide
+# Stellar-IndigoPay Webhook Receiver Guide
 
 IndigoPay sends signed HTTP POSTs to project-configured URLs whenever
 a milestone is reached. The body, headers, retry policy, and
@@ -14,7 +14,7 @@ verification flow are designed to be easy to consume in any language.
 | `X-Webhook-Timestamp` | Unix seconds at sign time. |
 | `X-Webhook-Signature` | `t=<unix>,v1=<hex hmac-sha256(secret, "<ts>.<body>")>` |
 | `X-Webhook-Attempt`   | 1-based attempt counter. |
-| `User-Agent`          | `IndigoPay-Webhook/1.0` |
+| `User-Agent`          | `Stellar-IndigoPay-Webhook/1.0` |
 | `Content-Type`        | `application/json` |
 
 ## Body

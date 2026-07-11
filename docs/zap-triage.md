@@ -4,7 +4,7 @@ This guide explains how automated DAST (Dynamic Application Security Testing) is
 
 ## How it Works in CI
 
-1. **Active Scanning**: The `zaproxy/action-baseline` GitHub Action automatically executes on the defined staging deployment (`https://staging.indigopay.app`).
+1. **Active Scanning**: The `zaproxy/action-baseline` GitHub Action automatically executes on the defined staging deployment (`https://staging.stellarindigopay.app`).
 2. **Report Generation**: It yields standard HTML and JSON findings reports.
 3. **CI Rules Enforcement**: The CI executes a triage script (`scripts/triage-zap.js`) which parses `report.json`.
 4. **Enforced Threshold**: The build **fails automatically** if there are any unhandled **HIGH or CRITICAL** risk findings (risk code `3`).
@@ -27,7 +27,7 @@ If a HIGH finding is reported by ZAP in CI but is determined to be a **false pos
    {
      "pluginId": "10020",
      "alert": "X-Frame-Options Header Scanner",
-     "url": "https://staging.indigopay.app/widget",
+     "url": "https://staging.stellarindigopay.app/widget",
      "reason": "Explain clearly why this is safe and verified."
    }
    ```

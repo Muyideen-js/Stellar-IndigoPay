@@ -1,9 +1,9 @@
 openapi: 3.0.3
 info:
-  title: Stellar IndigoPay API
+  title: Stellar-IndigoPay API
   version: 1.0.0
   description: |
-    OpenAPI 3.0 documentation for the backend REST API used by Stellar IndigoPay.
+    OpenAPI 3.0 documentation for the backend REST API used by Stellar-IndigoPay.
     The API exposes project discovery, donations, profiles, leaderboard, notifications,
     ratings, updates, jobs, stats, and admin management endpoints.
   license:
