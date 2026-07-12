@@ -5,10 +5,10 @@ Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before contributing.
 ## Getting started
 
 1. Fork and clone the repo.
-2. Install dependencies: `pnpm install` (root workspace).
+2. Install dependencies: `npm install` in the relevant package.
 3. Copy `.env.example` to `.env` and fill in the required values.
-4. Start the backend: `pnpm --filter backend dev`.
-5. Start the mobile app: `pnpm --filter mobile start`.
+4. Start the backend: `cd backend && npm run dev`.
+5. Start the frontend: `cd frontend && npm run dev`.
 
 ## ✅ Prerequisites
 
@@ -16,12 +16,11 @@ Install the following before cloning:
 
 | Tool             | Version | Install                                                           |
 | ---------------- | ------- | ----------------------------------------------------------------- |
-| Node.js          | ≥ 18.x  | [nodejs.org](https://nodejs.org) or `nvm install 18`              |
+| Node.js          | ≥ 20.x  | [nodejs.org](https://nodejs.org) or `nvm install 20`              |
 | npm              | latest  | bundled with Node                                                 |
 | Docker           | latest  | [docs.docker.com/get-docker](https://docs.docker.com/get-docker/) |
-| Rust + Cargo     | ≥ 1.74  | `curl https://sh.rustup.rs -sSf \| sh`                            |
-| Soroban CLI      | latest  | `cargo install --locked soroban-cli`                              |
-| Freighter Wallet | latest  | See below                                                         |
+| Rust + Cargo     | ≥ 1.91  | `curl https://sh.rustup.rs -sSf \| sh`                            |
+| Freighter Wallet | Latest  | See below                                                         |
 
 ### 🦊 Install Freighter & Switch to Testnet
 
@@ -48,16 +47,16 @@ https://friendbot.stellar.org/?addr=YOUR_PUBLIC_KEY
 curl "https://friendbot.stellar.org/?addr=YOUR_PUBLIC_KEY"
 ```
 
-A `{"hash": "..."}` response confirms success. Refresh Freighter to see the balance.
+A `{\"hash\": \"...\"}` response confirms success. Refresh Freighter to see the balance.
 
 ---
 
 ## 🍴 Fork & Set Up
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/stellar-indigopay.git
+git clone https://github.com/YOUR_USERNAME/Stellar-IndigoPay.git
 cd stellar-indigopay
-git remote add upstream https://github.com/your-org/stellar-indigopay.git
+git remote add upstream https://github.com/Stellar-IndigoPay/Stellar-IndigoPay.git
 chmod +x scripts/setup-dev.sh && ./scripts/setup-dev.sh
 ```
 
@@ -98,8 +97,6 @@ The Docker override watches backend changes through `backend/src` with Nodemon a
 
 ---
 
----
-
 ## Performance expectations
 
 The donations API **must** sustain 100 concurrent users with a **p95 latency
@@ -123,7 +120,7 @@ how to record baseline numbers.
 
 - Never log or persist private keys anywhere in the codebase.
 - Mobile: use `expo-secure-store` for all key-adjacent data (see
-  `mobile/src/hooks/useWallet.ts`).
+  `mobile/hooks/useBiometricAuth.ts` and `mobile/lib/secureStore.ts`).
 - Extension: use `window.freighter.signTransaction` — never ask the user for
   their secret key.
 - All Stellar transactions target the **testnet** unless `NETWORK=mainnet` is
@@ -136,8 +133,8 @@ Every PR must include an update to [CHANGELOG.md](CHANGELOG.md) under the `[Unre
 ## Testing
 
 ```bash
-pnpm test          # unit + integration
-pnpm test:e2e      # end-to-end (requires running backend + Horizon testnet)
+npm test          # unit + integration
+npm run test:e2e  # end-to-end (requires running backend + Horizon testnet)
 ```
 
 ## Sentry (Error monitoring)
