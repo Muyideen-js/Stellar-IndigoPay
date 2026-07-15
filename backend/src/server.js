@@ -211,6 +211,19 @@ for (const name of routeMounts) {
   }
 }
 
+// Analytics is mounted under /api/projects so the route handler receives
+// requests at /api/projects/:id/analytics (issue #71).
+try {
+  const analyticsRouter = require("./routes/analytics");
+  app.use("/api/projects", analyticsRouter);
+  app.use("/api/v1/projects", analyticsRouter);
+} catch (err) {
+  logger.error(
+    { event: "route_load_failed", route: "analytics", err: err.message },
+    "Failed to load analytics route module",
+  );
+}
+
 // ── 404 + error handling ────────────────────────────────────────────────────
 app.use((req, res) =>
   res.status(404).json({ error: `${req.method} ${req.path} not found` }),

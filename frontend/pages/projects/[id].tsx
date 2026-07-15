@@ -921,6 +921,15 @@ export default function ProjectDetail({
                   >
                     {shareState === "copied" ? "✓ Link copied!" : "Share 🌍"}
                   </button>
+                  {/* Analytics link — visible to wallet owner only */}
+                  {publicKey && project && publicKey === project.walletAddress && (
+                    <Link
+                      href={`/projects/${project.id}/analytics`}
+                      className="text-xs py-1 px-3 rounded-lg border font-medium bg-forest-600 text-white border-forest-600 hover:bg-forest-700 transition-colors"
+                    >
+                      Analytics 📊
+                    </Link>
+                  )}
                   {/* Follow button — visible to connected wallets only */}
                   {publicKey && (
                     <button
