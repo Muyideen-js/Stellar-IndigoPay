@@ -39,7 +39,7 @@ jest.mock("next/head", () => ({
 // Mock DonateForm
 jest.mock("@/components/DonateForm", () => ({
   __esModule: true,
-  default: ({ onSuccess }: { project: unknown; publicKey: string; onSuccess?: () => void }) => (
+  default: ({ onSuccess, publicKey }: { project: unknown; publicKey: string; onSuccess?: () => void }) => (
     <div data-testid="donate-form">
       <span data-testid="donate-public-key">{publicKey}</span>
       <button data-testid="trigger-donate-success" onClick={onSuccess}>
