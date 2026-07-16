@@ -2,19 +2,7 @@
 
 ### Features
 
-* **frontend:** WCAG 2.1 AA accessibility compliance (#138)
-  - New `<SkipToContent/>` link mounted as the first focusable element of every page so keyboard + screen-reader users can bypass the navbar (WCAG 2.4.1 Bypass Blocks).
-  - `pages/_app.tsx` wraps every page in `<main id="main-content" tabIndex={-1}>` so the skip link lands on a real `<main>` landmark.
-  - Reusable `useFocusTrap` hook (`frontend/hooks/useFocusTrap.ts`) and an extracted `<Tabs>` component (`frontend/components/Tabs.tsx`) implementing the WAI-ARIA 1.1 Tab Pattern (roving tabIndex, ArrowLeft/ArrowRight/Home/End navigation, role=tablist/tab/tabpanel).
-  - Accessible modal refactors: `MonthlyGivingSetup` and the inline wallet-connect dialog on the landing page now use `role="dialog"`, `aria-modal`, `aria-labelledby`, the focus-trap hook, and `onEscape` close handling.
-  - Dashboard `Impact / Saved Projects` refactored onto the new `<Tabs/>` component (verified by `Tabs.test.tsx`).
-  - Live regions so screen-readers are notified of dynamic content: sr-only `aria-live="polite"` on the live donation ticker, donation feed, donation-form flow steps, and toast notifications; `role="alert"` on form errors; `aria-invalid` + `aria-describedby` on the donation amount input.
-  - Keyboard focus indicator: global `:focus-visible` outline + `prefers-reduced-motion` neutralises looping animations for motion-sensitive users.
-  - Restored semantic HTML by lifting the wishlist button out of the project `<Link>` and giving the CO₂ info tooltip a non-interactive `<span role="img">` so the card subtree is valid.
-  - New tests: `Tabs.test.tsx`, `SkipToContent.test.tsx`, `MonthlyGivingSetup.test.tsx`, `DonateForm.a11y.test.tsx`, plus a behavior-only rewrite of `ProjectCard.test.tsx` so future DOM refactors no longer require snapshot regeneration. `jest-axe` + `@types/jest-axe` shim added; `jest.setup.ts` registers the matcher.
-  - CI: `.github/workflows/frontend.yml` now adds `frontend-lint`, `frontend-typecheck`, and `frontend-tests-smoke` (jest-axe resolution + minimal jest run) jobs before the existing build, gating the build on clean a11y + lint + type-check + tests. `.github/workflows/a11y-nightly.yml` runs a scheduled `@axe-core/playwright` crawl of every public page; the resulting `a11y-report.json` is uploaded as a workflow artefact.
-  - `frontend/scripts/axe-scan.mjs` + `README.md` document the nightly local run (`npm run a11y:scan`).
-  - Dependency cleanup: `jest-axe`, `axe-core`, `@axe-core/playwright`, and `playwright` are pinned to exact versions in `package.json` + an `overrides` block so `npm ci` is deterministic across CI runners.
+* **docs:** add CONTRIBUTORS.md to credit community work (GF-015, closes #64)
 
 * **backend:** implement Soroban RPC retry with exponential backoff and circuit breaker (GF-043, closes #100)
   - Add `backend/src/services/circuitBreaker.js` — reusable `CircuitBreaker` class (CLOSED / HALF_OPEN / OPEN state machine, configurable `failureThreshold` and `resetTimeout`)
