@@ -2,6 +2,8 @@
 
 ### Features
 
+* **docs:** add CONTRIBUTORS.md to credit community work (GF-015, closes #64)
+
 * **backend:** implement Soroban RPC retry with exponential backoff and circuit breaker (GF-043, closes #100)
   - Add `backend/src/services/circuitBreaker.js` — reusable `CircuitBreaker` class (CLOSED / HALF_OPEN / OPEN state machine, configurable `failureThreshold` and `resetTimeout`)
   - Export `indigopay_soroban_circuit_breaker_state` Prometheus Gauge (0=closed, 1=half_open, 2=open)
