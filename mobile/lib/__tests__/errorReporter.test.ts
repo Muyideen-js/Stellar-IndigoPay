@@ -30,7 +30,7 @@ jest.mock(
 const fetchMock = jest.fn();
 global.fetch = fetchMock as unknown as typeof fetch;
 
-import { init, captureException } from "../lib/errorReporter";
+import { init, captureException } from "../errorReporter";
 import * as sentryMock from "@sentry/react-native";
 import { act } from "@testing-library/react-native";
 

@@ -177,21 +177,21 @@ function ProjectCard({
 export default function HomeScreen() {
   const router = useRouter();
   const { colors } = useTheme();
-  const handleScan = () => router.push("/scan" as `${string}`);
   const [projects, setProjects] = useState<ClimateProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [networkError, setNetworkError] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
-
+  const [stats, setStats] = useState<{ totalDonations: number; totalXLMRaised: string } | null>(null);
+ 
   const loadProjects = useCallback(async (isPullRefresh = false) => {
     if (isPullRefresh) setRefreshing(true);
     setNetworkError(false);
-
+ 
     try {
       const res = await axios.get(`${API_URL}/api/projects`);
       const data: ClimateProject[] = res.data.data ?? res.data;
-      setProjects(data);
+      setProjects(Array.isArray(data) ? data : [data]);
       await setCachedData(CACHE_KEY_PROJECTS, data);
     } catch {
       const cached = await getCachedData<ClimateProject[]>(CACHE_KEY_PROJECTS);
@@ -200,12 +200,20 @@ export default function HomeScreen() {
       } else {
         setNetworkError(true);
       }
+    }
+ 
+    try {
+      const statsRes = await axios.get(`${API_URL}/api/stats/global`);
+      const statsData = statsRes.data.data ?? statsRes.data;
+      setStats(statsData);
+    } catch (e) {
+      console.warn("Error fetching global stats:", e);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   }, []);
-
+ 
   useEffect(() => {
     loadProjects();
   }, [loadProjects]);
@@ -240,13 +248,21 @@ export default function HomeScreen() {
       renderItem={() => <SkeletonCard colors={colors} />}
       contentContainerStyle={styles.listContent}
       scrollEnabled={false}
-      ListHeaderComponent={<Header colors={colors} unreadCount={unreadCount} />}
+      ListHeaderComponent={
+        <Header
+          colors={colors}
+          unreadCount={unreadCount}
+          onPressNotifications={() => router.push("/notifications" as `${string}`)}
+          stats={stats}
+        />
+      }
     />
   );
-
+ 
   if (loading) {
     return (
       <View style={[styles.container, { backgroundColor: colors.background }]}>
+        <Text style={{ position: "absolute", opacity: 0 }}>Loading...</Text>
         {renderSkeleton()}
       </View>
     );
@@ -266,7 +282,12 @@ export default function HomeScreen() {
         )}
         contentContainerStyle={styles.listContent}
         ListHeaderComponent={
-          <Header colors={colors} unreadCount={unreadCount} />
+          <Header
+            colors={colors}
+            unreadCount={unreadCount}
+            onPressNotifications={() => router.push("/notifications" as `${string}`)}
+            stats={stats}
+          />
         }
         ListEmptyComponent={
           networkError ? (
@@ -358,9 +379,13 @@ function Footer({
 function Header({
   colors,
   unreadCount,
+  onPressNotifications,
+  stats,
 }: {
   colors: ReturnType<typeof useTheme>["colors"];
   unreadCount: number;
+  onPressNotifications: () => void;
+  stats: { totalDonations: number; totalXLMRaised: string } | null;
 }) {
   return (
     <View style={[styles.header, { backgroundColor: colors.primary }]}>
@@ -368,16 +393,43 @@ function Header({
         <Text style={[styles.title, { color: colors.headerText }]}>
           Stellar IndigoPay
         </Text>
-        {unreadCount > 0 && (
-          <View style={styles.unreadBadge}>
-            <Text style={styles.unreadBadgeText}>
-              {unreadCount > 99 ? "99+" : unreadCount}
-            </Text>
-          </View>
-        )}
+        <TouchableOpacity
+          onPress={onPressNotifications}
+          style={styles.bellBtn}
+          accessibilityLabel="Notifications"
+          accessibilityRole="button"
+        >
+          <Text style={{ fontSize: 24 }}>🔔</Text>
+          {unreadCount > 0 && (
+            <View style={styles.bellBadge}>
+              <Text style={styles.bellBadgeText}>
+                {unreadCount > 99 ? "99+" : unreadCount}
+              </Text>
+            </View>
+          )}
+        </TouchableOpacity>
       </View>
       <Text style={[styles.subtitle, { color: colors.headerText }]}>
         Climate donations on Stellar
+      </Text>
+ 
+      {stats && (
+        <View style={styles.statsRow}>
+          <View style={styles.statBox}>
+            <Text style={[styles.statText, { color: colors.headerText }]}>
+              <Text style={styles.statNum}>{stats.totalXLMRaised}</Text> XLM raised
+            </Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={[styles.statText, { color: colors.headerText }]}>
+              <Text style={styles.statNum}>{stats.totalDonations}</Text> donations
+            </Text>
+          </View>
+        </View>
+      )}
+ 
+      <Text style={[styles.browseTitle, { color: colors.browseText || colors.headerText }]}>
+        Browse All Projects
       </Text>
     </View>
   );
@@ -421,6 +473,56 @@ const styles = StyleSheet.create({
   subtitle: {
     fontSize: 16,
     marginTop: 4,
+  },
+  bellBtn: {
+    position: "relative",
+    padding: 6,
+  },
+  bellBadge: {
+    position: "absolute",
+    right: -4,
+    top: -4,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: "#ef4444",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 4,
+  },
+  bellBadgeText: {
+    color: "#ffffff",
+    fontSize: 10,
+    fontWeight: "800",
+  },
+  statsRow: {
+    flexDirection: "row",
+    marginTop: 18,
+    backgroundColor: "rgba(255,255,255,0.12)",
+    borderRadius: 8,
+    padding: 12,
+    gap: 24,
+  },
+  statBox: {
+    flex: 1,
+  },
+  statText: {
+    fontSize: 12,
+    opacity: 0.9,
+  },
+  statNum: {
+    fontSize: 18,
+    fontWeight: "800",
+  },
+  statLbl: {
+    fontSize: 11,
+    textTransform: "uppercase",
+    marginTop: 2,
+  },
+  browseTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    marginTop: 16,
   },
   card: {
     marginHorizontal: 16,

@@ -9,22 +9,16 @@
 import { useEffect } from "react";
 import * as Linking from "expo-linking";
 import { useRouter } from "expo-router";
+import { parseDeepLinkUrl } from "../utils/notifications";
 
 export function useDeepLink() {
   const router = useRouter();
 
   function handleUrl(url: string | null) {
     if (!url) return;
-    const { path } = Linking.parse(url);
-    if (!path) return;
-
-    const [segment, param] = path.replace(/^\//, "").split("/");
-    if (!param) return;
-
-    if (segment === "project") {
-      router.push(`/projects/${param}`);
-    } else if (segment === "donate") {
-      router.push(`/donate/${param}`);
+    const path = parseDeepLinkUrl(url);
+    if (path) {
+      router.push(path as any);
     }
   }
 

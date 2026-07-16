@@ -30,7 +30,9 @@ import {
   getPushToken,
   followProject,
   unfollowProject,
+  markNotificationsSeen,
 } from "../../utils/notifications";
+import * as Notifications from "expo-notifications";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 
@@ -148,13 +150,19 @@ export default function ProjectDetailScreen() {
   const [toast, setToast] = useState<ToastState | null>(null);
 
   useEffect(() => {
+    let active = true;
     if (id) {
       loadProject(id as string);
       initializeNotifications();
       markNotificationsSeen().then(() => {
-        Notifications.setBadgeCountAsync(0).catch(() => undefined);
+        if (active) {
+          Notifications.setBadgeCountAsync(0).catch(() => undefined);
+        }
       });
     }
+    return () => {
+      active = false;
+    };
   }, [id]);
 
   // ── helpers ────────────────────────────────────────────────────────────────
