@@ -14,11 +14,12 @@ const {
   sanitizedStringField,
   validateBody,
 } = require("../middleware/validation");
+const { z } = require("zod");
+const { AppError } = require("../errors");
+
 function validateKey(k) {
   if (!k || !/^G[A-Z0-9]{55}$/.test(k)) {
-    const e = new Error("Invalid public key");
-    e.status = 400;
-    throw e;
+    throw new AppError("INVALID_ADDRESS");
   }
 }
 
@@ -48,9 +49,7 @@ router.get(
       [req.params.publicKey],
     );
     if (!result.rows[0]) {
-      const e = new Error("Profile not found");
-      e.status = 404;
-      throw e;
+      throw new AppError("PROFILE_NOT_FOUND");
     }
 
     const co2Result = await pool.query(

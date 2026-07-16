@@ -23,15 +23,21 @@ jest.mock("../services/storage", () => ({
     backend: "local",
   })),
   backendName: () => "local",
+  uploadToIPFS: jest.fn(async () => ({ cid: null, storage_backend: "local" })),
+  isIpfsConfigured: jest.fn(() => false),
   UPLOAD_DIR: "/tmp/uploads",
 }));
 
+const fs = require("fs");
+const path = require("path");
 const express = require("express");
 const request = require("supertest");
 const pool = require("../db/pool");
 const { signToken } = require("../middleware/auth");
 const verification = require("./verification");
 const email = require("../services/email");
+const storage = require("../services/storage");
+const { AppError } = require("../errors");
 
 function buildApp() {
   const app = express();
@@ -39,6 +45,9 @@ function buildApp() {
   // Bypass helmet/csrf from server.js for the unit test.
   app.use("/api/verification-requests", verification);
   app.use((err, _req, res, _next) => {
+    if (err instanceof AppError) {
+      return res.status(err.status).json(err.toJSON());
+    }
     res
       .status(err.status || 500)
       .json({ error: err.message || "Internal server error" });
@@ -106,6 +115,11 @@ describe("POST /api/verification-requests", () => {
   beforeEach(() => {
     app = buildApp();
     jest.clearAllMocks();
+    storage.isIpfsConfigured.mockReturnValue(false);
+    storage.uploadToIPFS.mockResolvedValue({
+      cid: null,
+      storage_backend: "local",
+    });
     pool.query.mockResolvedValue({ rows: [MOCK_DB_ROW] });
   });
 
@@ -146,8 +160,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, organizationName: "" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe("Validation failed");
-    expect(res.body.details[0].path).toBe("organizationName");
+    expect(res.body.error.detail).toMatch(/organizationName/);
     expect(pool.query).not.toHaveBeenCalled();
   });
 
@@ -156,8 +169,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, contactEmail: "not-an-email" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe("Validation failed");
-    expect(res.body.details[0].path).toBe("contactEmail");
+    expect(res.body.error.detail).toMatch(/contactEmail/);
   });
 
   test("rejects malformed Stellar address", async () => {
@@ -165,8 +177,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, walletAddress: "not-a-wallet" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe("Validation failed");
-    expect(res.body.details[0].path).toBe("walletAddress");
+    expect(res.body.error.detail).toMatch(/walletAddress/);
   });
 
   test("rejects project category not in the whitelist", async () => {
@@ -174,8 +185,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, projectCategory: "Not a real category" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe("Validation failed");
-    expect(res.body.details[0].path).toBe("projectCategory");
+    expect(res.body.error.detail).toMatch(/projectCategory/);
   });
 
   test("rejects negative CO₂ per XLM", async () => {
@@ -183,8 +193,7 @@ describe("POST /api/verification-requests", () => {
       .post("/api/verification-requests")
       .send({ ...VALID_PAYLOAD, co2PerXLM: "-1" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe("Validation failed");
-    expect(res.body.details[0].path).toBe("co2PerXLM");
+    expect(res.body.error.detail).toMatch(/co2PerXLM/);
   });
 
   test("rejects document with non-http(s) URL", async () => {
@@ -197,8 +206,83 @@ describe("POST /api/verification-requests", () => {
         ],
       });
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe("Validation failed");
-    expect(res.body.details[0].path).toBe("supportingDocuments.0.url");
+    expect(res.body.error.detail).toMatch(/document.url/);
+  });
+
+  test("does not mirror external document URLs even when IPFS is configured", async () => {
+    storage.isIpfsConfigured.mockReturnValue(true);
+
+    const res = await request(app)
+      .post("/api/verification-requests")
+      .send(VALID_PAYLOAD);
+
+    expect(res.status).toBe(201);
+    expect(storage.uploadToIPFS).not.toHaveBeenCalled();
+  });
+
+  test("mirrors locally uploaded documents to IPFS when configured", async () => {
+    const uploadRoot = path.resolve("/tmp/uploads");
+    const uploadPath = path.join(uploadRoot, "test-key");
+    fs.mkdirSync(uploadRoot, { recursive: true });
+    fs.writeFileSync(uploadPath, "document contents");
+
+    storage.isIpfsConfigured.mockReturnValue(true);
+    storage.uploadToIPFS.mockResolvedValue({
+      cid: "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+      url: "https://w3s.link/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+      sha256: "a".repeat(64),
+      storage_backend: "ipfs",
+    });
+    pool.query.mockResolvedValue({
+      rows: [
+        {
+          ...MOCK_DB_ROW,
+          supporting_documents: [
+            {
+              name: "methodology.pdf",
+              url: "https://w3s.link/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+              cid: "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+              sha256: "a".repeat(64),
+              storage_backend: "ipfs",
+            },
+          ],
+        },
+      ],
+    });
+
+    const res = await request(app)
+      .post("/api/verification-requests")
+      .send({
+        ...VALID_PAYLOAD,
+        supportingDocuments: [
+          {
+            name: "methodology.pdf",
+            url: "/api/uploads/test-key",
+            size: 1024,
+            contentType: "application/pdf",
+            backend: "local",
+          },
+        ],
+      });
+
+    expect(res.status).toBe(201);
+    expect(storage.uploadToIPFS).toHaveBeenCalledWith(
+      uploadPath,
+      "methodology.pdf",
+    );
+    const insertCall = pool.query.mock.calls.find(
+      ([sql]) =>
+        typeof sql === "string" &&
+        sql.startsWith("INSERT INTO verification_requests"),
+    );
+    const storedDocs = JSON.parse(insertCall[1][12]);
+    expect(storedDocs[0]).toMatchObject({
+      cid: "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+      storage_backend: "ipfs",
+      sha256: "a".repeat(64),
+    });
+
+    fs.unlinkSync(uploadPath);
   });
 });
 
@@ -306,7 +390,7 @@ describe("PATCH /api/verification-requests/:id/status (admin)", () => {
       .set("Authorization", `Bearer ${token}`)
       .send({ status: "approved" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/Cannot transition/);
+    expect(res.body.error.detail).toMatch(/Cannot transition/);
   });
 
   test("rejects an unknown target status", async () => {

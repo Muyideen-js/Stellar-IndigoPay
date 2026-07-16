@@ -27,6 +27,8 @@
 
 const express = require("express");
 const router = express.Router();
+const fs = require("fs");
+const path = require("path");
 const { v4: uuid } = require("uuid");
 const { z } = require("zod");
 const pool = require("../db/pool");
@@ -39,7 +41,13 @@ const {
 const { logAdminAction } = require("../services/audit");
 const { createRateLimiter } = require("../middleware/rateLimiter");
 const { sendAdminVerificationNotification } = require("../services/email");
-const { backendName } = require("../services/storage");
+const {
+  backendName,
+  uploadToIPFS,
+  isIpfsConfigured,
+  UPLOAD_DIR,
+} = require("../services/storage");
+const { AppError } = require("../errors");
 
 const submitLimiter = createRateLimiter(10, 15); // 10 submissions / 15 min / IP
 
@@ -49,6 +57,11 @@ const VALID_TRANSITIONS = {
   approved: [],
   rejected: ["pending"],
 };
+
+const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const URL_RE = /^https?:\/\/[^\s]{2,}$/i;
+const LOCAL_UPLOAD_URL_RE = /^\/api\/uploads\/[^/?#]+$/;
 
 function mapRequestRow(row) {
   if (!row) return null;
@@ -86,13 +99,233 @@ function mapRequestRow(row) {
   };
 }
 
+function validateDocument(doc) {
+  if (!doc || typeof doc !== "object") return "each document must be an object";
+  if (
+    typeof doc.url !== "string" ||
+    (!URL_RE.test(doc.url) && !LOCAL_UPLOAD_URL_RE.test(doc.url))
+  ) {
+    return "document.url must be an http(s) URL or a local /api/uploads URL";
+  }
+  if (
+    typeof doc.name !== "string" ||
+    doc.name.length < 1 ||
+    doc.name.length > 200
+  ) {
+    return "document.name must be a string (1-200 chars)";
+  }
+  if (typeof doc.size === "number" && doc.size < 0)
+    return "document.size must be >= 0";
+  return null;
+}
+
+function localUploadKeyFromUrl(url) {
+  const parsed = new URL(url, "http://localhost");
+  if (!parsed.pathname.startsWith("/api/uploads/")) return null;
+  const key = decodeURIComponent(path.posix.basename(parsed.pathname));
+  return key || null;
+}
+
+/**
+ * Mirror locally stored supporting documents to IPFS so the verification
+ * pipeline has a tamper-evident, content-addressed copy of each file.
+ *
+ * Only documents that resolve to a file inside backend/uploads/ are
+ * mirrored (i.e. those uploaded through POST /api/uploads with the local
+ * backend). External URLs and already-IPFS documents pass through
+ * untouched. uploadToIPFS() itself never throws while
+ * IPFS_FALLBACK_TO_LOCAL is on, so a gateway outage degrades to
+ * storage_backend: "local" instead of failing the submission.
+ */
+async function mirrorDocumentsToIPFS(documents) {
+  return Promise.all(
+    documents.map(async (doc) => {
+      if (doc.cid || doc.storage_backend === "ipfs") return doc;
+
+      // Only mirror documents served from our own /api/uploads/<key> route.
+      const key = localUploadKeyFromUrl(doc.url);
+      if (!key) {
+        return { ...doc, storage_backend: doc.storage_backend || "local" };
+      }
+      const uploadsRoot = path.resolve(UPLOAD_DIR);
+      const localPath = path.resolve(uploadsRoot, key);
+      // Defence-in-depth: basename() strips separators, but re-check that
+      // the resolved path cannot escape the uploads directory.
+      if (
+        !localPath.startsWith(uploadsRoot + path.sep) ||
+        !fs.existsSync(localPath)
+      ) {
+        return { ...doc, storage_backend: doc.storage_backend || "local" };
+      }
+
+      const ipfsResult = await uploadToIPFS(localPath, doc.name);
+      if (!ipfsResult.cid) {
+        return { ...doc, storage_backend: "local" };
+      }
+      return {
+        ...doc,
+        cid: ipfsResult.cid,
+        url: ipfsResult.url,
+        sha256: ipfsResult.sha256,
+        storage_backend: "ipfs",
+      };
+    }),
+  );
+}
+
 /**
  * POST /api/verification-requests
  * Public. Persists the submission and notifies admins by email.
  */
 router.post("/", submitLimiter, validate(verificationSchema), async (req, res, next) => {
   try {
-    const body = req.body;
+    const body = req.body || {};
+    const errors = [];
+
+    const orgName =
+      typeof body.organizationName === "string"
+        ? body.organizationName.trim()
+        : "";
+    if (orgName.length < 2 || orgName.length > 200) {
+      errors.push("organizationName must be 2-200 characters");
+    }
+
+    let website = null;
+    if (body.organizationWebsite != null && body.organizationWebsite !== "") {
+      if (
+        typeof body.organizationWebsite !== "string" ||
+        body.organizationWebsite.length > 500
+      ) {
+        errors.push(
+          "organizationWebsite must be a string up to 500 characters",
+        );
+      } else if (!URL_RE.test(body.organizationWebsite)) {
+        errors.push("organizationWebsite must be a valid http(s) URL");
+      } else {
+        website = body.organizationWebsite.trim();
+      }
+    }
+
+    let country = null;
+    if (body.organizationCountry != null && body.organizationCountry !== "") {
+      if (
+        typeof body.organizationCountry !== "string" ||
+        body.organizationCountry.trim().length > 80
+      ) {
+        errors.push("organizationCountry must be a string up to 80 characters");
+      } else {
+        country = body.organizationCountry.trim();
+      }
+    }
+
+    const email =
+      typeof body.contactEmail === "string"
+        ? body.contactEmail.trim().toLowerCase()
+        : "";
+    if (!EMAIL_RE.test(email))
+      errors.push("contactEmail must be a valid email");
+
+    const walletAddress =
+      typeof body.walletAddress === "string" ? body.walletAddress.trim() : "";
+    if (!STELLAR_ADDRESS_RE.test(walletAddress)) {
+      errors.push(
+        "walletAddress must be a valid Stellar address (56 chars, starts with G)",
+      );
+    }
+
+    const projectName =
+      typeof body.projectName === "string" ? body.projectName.trim() : "";
+    if (projectName.length < 2 || projectName.length > 200) {
+      errors.push("projectName must be 2-200 characters");
+    }
+
+    const projectCategory =
+      typeof body.projectCategory === "string"
+        ? body.projectCategory.trim()
+        : "";
+    if (!VALID_CATEGORIES.includes(projectCategory)) {
+      errors.push(
+        `projectCategory must be one of: ${VALID_CATEGORIES.join(", ")}`,
+      );
+    }
+
+    const projectLocation =
+      typeof body.projectLocation === "string"
+        ? body.projectLocation.trim()
+        : "";
+    if (projectLocation.length < 2 || projectLocation.length > 200) {
+      errors.push("projectLocation must be 2-200 characters");
+    }
+
+    let projectDescription = null;
+    if (body.projectDescription != null && body.projectDescription !== "") {
+      if (
+        typeof body.projectDescription !== "string" ||
+        body.projectDescription.length > 5000
+      ) {
+        errors.push(
+          "projectDescription must be a string up to 5000 characters",
+        );
+      } else {
+        projectDescription = body.projectDescription.trim();
+      }
+    }
+
+    const co2PerXLM = Number.parseFloat(body.co2PerXLM);
+    if (!Number.isFinite(co2PerXLM) || co2PerXLM < 0) {
+      errors.push("co2PerXLM must be a non-negative number");
+    }
+
+    let expectedAnnualTonnesCO2 = null;
+    if (
+      body.expectedAnnualTonnesCO2 != null &&
+      body.expectedAnnualTonnesCO2 !== ""
+    ) {
+      const parsed = Number.parseFloat(body.expectedAnnualTonnesCO2);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        errors.push(
+          "expectedAnnualTonnesCO2 must be a non-negative number when provided",
+        );
+      } else {
+        expectedAnnualTonnesCO2 = parsed;
+      }
+    }
+
+    const documents = Array.isArray(body.supportingDocuments)
+      ? body.supportingDocuments
+      : [];
+    if (documents.length > 20) {
+      errors.push("supportingDocuments must contain at most 20 entries");
+    }
+    // Collect every document error so the submitter can fix them all in one
+    // pass instead of submitting and re-submitting one fix at a time.
+    documents.forEach((doc, index) => {
+      const err = validateDocument(doc);
+      if (err) errors.push(`supportingDocuments[${index}]: ${err}`);
+    });
+
+    let notes = null;
+    if (body.notes != null && body.notes !== "") {
+      if (typeof body.notes !== "string" || body.notes.length > 2000) {
+        errors.push("notes must be a string up to 2000 characters");
+      } else {
+        notes = body.notes.trim();
+      }
+    }
+
+    if (errors.length > 0) {
+      throw new AppError("VALIDATION_ERROR", { detail: errors.join("; ") });
+    }
+
+    // Pin locally uploaded documents to IPFS (content-addressed, tamper
+    // evident). Skipped entirely when IPFS is not configured; individual
+    // failures fall back to the local copy so a gateway outage can never
+    // block a submission.
+    let processedDocs = documents;
+    if (documents.length > 0 && isIpfsConfigured()) {
+      processedDocs = await mirrorDocumentsToIPFS(documents);
+    }
+
     const id = uuid();
     const result = await pool.query(
       `INSERT INTO verification_requests (
@@ -121,7 +354,7 @@ router.post("/", submitLimiter, validate(verificationSchema), async (req, res, n
         body.expectedAnnualTonnesCO2 != null && body.expectedAnnualTonnesCO2 !== ""
           ? Number.parseFloat(body.expectedAnnualTonnesCO2).toFixed(7)
           : null,
-        JSON.stringify(body.supportingDocuments),
+        JSON.stringify(processedDocs),
         backendName(),
         body.notes?.trim() || null,
       ],
@@ -153,13 +386,16 @@ router.post("/", submitLimiter, validate(verificationSchema), async (req, res, n
  * Public. Returns the request rows owned by the queried wallet (most recent
  * first). Lets submitters check status without admin auth. Capped at 50.
  */
-router.get(
-  "/me",
-  validate(z.object({ wallet: stellarAddress }), "query"),
-  async (req, res, next) => {
-    try {
-      const wallet = req.query.wallet;
-      const result = await pool.query(
+router.get("/me", async (req, res, next) => {
+  try {
+    const wallet =
+      typeof req.query.wallet === "string" ? req.query.wallet.trim() : "";
+    if (!STELLAR_ADDRESS_RE.test(wallet)) {
+      throw new AppError("INVALID_ADDRESS", {
+        detail: "wallet query param must be a valid Stellar address",
+      });
+    }
+    const result = await pool.query(
       `SELECT * FROM verification_requests
         WHERE wallet_address = $1
         ORDER BY submitted_at DESC
@@ -185,8 +421,7 @@ router.get("/:id", async (req, res, next) => {
       [req.params.id],
     );
     const row = result.rows[0];
-    if (!row)
-      return res.status(404).json({ error: "Verification request not found" });
+    if (!row) throw new AppError("VERIFICATION_NOT_FOUND");
 
     // Allow admin-readable without wallet guard.
     const auth = req.headers.authorization || "";
@@ -205,8 +440,8 @@ router.get("/:id", async (req, res, next) => {
     const wallet =
       typeof req.query.wallet === "string" ? req.query.wallet.trim() : "";
     if (!wallet || wallet !== row.wallet_address) {
-      return res.status(403).json({
-        error: "Provide a matching ?wallet= query param to view this request",
+      throw new AppError("FORBIDDEN", {
+        detail: "Provide a matching ?wallet= query param to view this request",
       });
     }
     res.json({ success: true, data: mapRequestRow(row) });
@@ -261,8 +496,9 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
   try {
     const { status, reviewerNotes, reviewedBy } = req.body || {};
     if (!status || !Object.keys(VALID_TRANSITIONS).includes(status)) {
-      return res.status(400).json({
-        error: `status must be one of: ${Object.keys(VALID_TRANSITIONS).join(", ")}`,
+      throw new AppError("VALIDATION_ERROR", {
+        field: "status",
+        detail: `status must be one of: ${Object.keys(VALID_TRANSITIONS).join(", ")}`,
       });
     }
     const reviewerNotesStr =
@@ -270,9 +506,10 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
         ? reviewerNotes.trim()
         : null;
     if (reviewerNotesStr && reviewerNotesStr.length > 2000) {
-      return res
-        .status(400)
-        .json({ error: "reviewerNotes must be at most 2000 characters" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "reviewerNotes",
+        detail: "reviewerNotes must be at most 2000 characters",
+      });
     }
 
     const existing = await pool.query(
@@ -280,18 +517,17 @@ router.patch("/:id/status", adminRequired, async (req, res, next) => {
       [req.params.id],
     );
     const row = existing.rows[0];
-    if (!row)
-      return res.status(404).json({ error: "Verification request not found" });
+    if (!row) throw new AppError("VERIFICATION_NOT_FOUND");
 
     const transitions = VALID_TRANSITIONS[row.status] || [];
     if (row.status === status) {
-      return res
-        .status(400)
-        .json({ error: `Request is already in "${status}" state` });
+      throw new AppError("INVALID_STATE_TRANSITION", {
+        detail: `Request is already in "${status}" state`,
+      });
     }
     if (!transitions.includes(status)) {
-      return res.status(400).json({
-        error: `Cannot transition from "${row.status}" to "${status}"`,
+      throw new AppError("INVALID_STATE_TRANSITION", {
+        detail: `Cannot transition from "${row.status}" to "${status}"`,
       });
     }
 

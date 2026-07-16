@@ -15,20 +15,32 @@ rustup target add wasm32v1-none
 
 ### Unit Tests
 
-To run the standard unit tests with the testutils feature enabled:
+To run the standard unit tests across all workspace members with the testutils feature enabled:
 
 ```bash
-# Run unit tests
-cargo test --features testutils
+# Run unit tests (all contracts in workspace)
+cargo test --features testutils --workspace
+```
+
+To skip the fuzz tests (run by a separate CI job):
+
+```bash
+cargo test --features testutils --workspace -- --skip fuzz::
 ```
 
 ### Fuzz Tests
 
-To run fuzz tests, use the following command:
+To run fuzz tests (default 10 000 iterations):
 
 ```bash
 # Run fuzz tests
-cargo test --features testutils fuzz
+cargo test --features testutils -- fuzz
+```
+
+Override the iteration count via environment variable:
+
+```bash
+FUZZ_ITERATIONS=100000 cargo test --features testutils -- fuzz
 ```
 
 ### Expected Output
