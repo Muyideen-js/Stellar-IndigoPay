@@ -114,6 +114,8 @@ export async function getAllBalances(
 
   for (const balance of account.balances) {
     if (balance.asset_type === "native") continue;
+    // Filter out liquidity pool shares which lack asset_code/asset_issuer
+    if (!("asset_code" in balance)) continue;
     // Only include assets with non-zero balance
     const b = parseFloat(balance.balance);
     if (b <= 0) continue;
