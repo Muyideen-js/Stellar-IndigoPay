@@ -1,25 +1,12 @@
-/**
- * __mocks__/NativeModules.js
- * Mocks react-native/Libraries/BatchedBridge/NativeModules
- * providing a proxy that dynamically returns mocks for any native modules.
- */
-const NativeModules = {
-  UIManager: {
-    customBubblingEventTypes: {},
-    customDirectEventTypes: {},
-    configureNextLayoutAnimation: jest.fn(),
-    getViewManagerConfig: jest.fn(() => ({})),
-  },
-  default: null,
-};
+// __mocks__/NativeModules.js
+// Fix compatibility with jest-expo setup script that requires .default and .UIManager on NativeModules
+const NativeModules = jest.requireActual('react-native/Libraries/BatchedBridge/NativeModules');
+
+// Expose self as default export to satisfy jest-expo's require('...').default
 NativeModules.default = NativeModules;
 
-module.exports = new Proxy(NativeModules, {
-  get(target, prop) {
-    if (prop === 'default') return target;
-    if (!(prop in target)) {
-      target[prop] = {};
-    }
-    return target[prop];
-  }
-});
+if (!NativeModules.UIManager) {
+  NativeModules.UIManager = {};
+}
+
+module.exports = NativeModules;

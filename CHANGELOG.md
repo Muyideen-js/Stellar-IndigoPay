@@ -1,3 +1,27 @@
+## [Unreleased]
+
+### Features
+
+* **backend,frontend:** add Idempotency-Key support for donation recording (closes #148)
+  - Accept `Idempotency-Key` header (UUID v4) on `POST /api/donations`; store response and replay within 24 hours
+  - New `idempotency_keys` table via migration 016 with index on `created_at`
+  - Hourly pg-boss cleanup cron (`idempotencyCleanup`) purges expired keys (configurable via `IDEMPOTENCY_CLEANUP_CRON`)
+  - Frontend: `DonateForm` and `bridge` generate `crypto.randomUUID()` per donation attempt
+  - Documented in OpenAPI spec with 200 replay response
+  - 11 new tests: 5 unit (donations), 8 unit (cleanup), 3 integration (testcontainers)
+
+* **docs:** add CONTRIBUTORS.md to credit community work (GF-015, closes #64)
+
+* **backend:** implement Soroban RPC retry with exponential backoff and circuit breaker (GF-043, closes #100)
+  - Add `backend/src/services/circuitBreaker.js` — reusable `CircuitBreaker` class (CLOSED / HALF_OPEN / OPEN state machine, configurable `failureThreshold` and `resetTimeout`)
+  - Export `indigopay_soroban_circuit_breaker_state` Prometheus Gauge (0=closed, 1=half_open, 2=open)
+  - Update `backend/src/services/stellar.js` with `withRetry()` (exponential backoff: 100ms → 200ms → 400ms, max 3 retries env-configurable via `SOROBAN_RPC_MAX_RETRIES`) and `rpcBreaker` circuit breaker wrapping all Soroban RPC calls
+  - Export `indigopay_soroban_rpc_retries_total` Prometheus Counter
+  - Update `backend/src/routes/readiness.js` to include `soroban_rpc` health check in `/api/readyz` response (reports `ok` or `degraded`)
+  - Add 33-test suite `backend/src/services/circuitBreaker.test.js` covering state machine, `isRetryable` classification, retry logic, circuit breaker open/half-open/closed transitions, and Prometheus metrics
+
+---
+
 # 1.0.0 (2026-07-12)
 
 
@@ -153,6 +177,8 @@ RETURNING id, (xmax=0) AS inserted` on `webhook_deliveries`.
   existing `deliveryId` rather than silently re-creating a row.
 - `backend/src/services/indexerService` exposes a `stop()` method so the
   Stellar Horizon stream is closed cleanly on SIGTERM.
+
+- **scripts:** ensure `scripts/setup-dev.sh` installs `mobile` and `extension` dependencies (fix README mismatch)
 
 - **NetworkPolicies** — default-deny for the `indigopay` namespace plus
   explicit allow policies for ingress → backend, backend → postgres +

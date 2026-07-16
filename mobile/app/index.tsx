@@ -22,6 +22,8 @@ import {
   getUnreadNotificationCount,
   setupNotificationListener,
 } from "../utils/notifications";
+import DonationQueueStatus from "../components/DonationQueueStatus";
+import { startQueueWorker, stopQueueWorker } from "../utils/donationQueueWorker";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://localhost:4000";
 const CACHE_KEY_PROJECTS = "home:projects_list";
@@ -216,6 +218,12 @@ export default function HomeScreen() {
  
   useEffect(() => {
     loadProjects();
+    // Start the offline donation queue retry worker (module-level singleton)
+    startQueueWorker();
+    return () => {
+      // Cleanup worker when component unmounts
+      stopQueueWorker();
+    };
   }, [loadProjects]);
 
   useEffect(() => {
@@ -264,6 +272,7 @@ export default function HomeScreen() {
       <View style={[styles.container, { backgroundColor: colors.background }]}>
         <Text style={{ position: "absolute", opacity: 0 }}>Loading...</Text>
         {renderSkeleton()}
+        <DonationQueueStatus />
       </View>
     );
   }
@@ -329,6 +338,7 @@ export default function HomeScreen() {
         ListFooterComponent={<Footer colors={colors} />}
         showsVerticalScrollIndicator={false}
       />
+      <DonationQueueStatus />
     </View>
   );
 }
@@ -387,27 +397,29 @@ function Header({
   onPressNotifications: () => void;
   stats: { totalDonations: number; totalXLMRaised: string } | null;
 }) {
+  const router = useRouter();
   return (
     <View style={[styles.header, { backgroundColor: colors.primary }]}>
       <View style={styles.headerTitleRow}>
         <Text style={[styles.title, { color: colors.headerText }]}>
           Stellar IndigoPay
         </Text>
-        <TouchableOpacity
-          onPress={onPressNotifications}
-          style={styles.bellBtn}
-          accessibilityLabel="Notifications"
-          accessibilityRole="button"
-        >
-          <Text style={{ fontSize: 24 }}>🔔</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
           {unreadCount > 0 && (
-            <View style={styles.bellBadge}>
-              <Text style={styles.bellBadgeText}>
+            <View style={styles.unreadBadge}>
+              <Text style={styles.unreadBadgeText}>
                 {unreadCount > 99 ? "99+" : unreadCount}
               </Text>
             </View>
           )}
-        </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => router.push("/settings" as `${string}`)}
+            accessibilityLabel="Open settings screen"
+            accessibilityRole="button"
+          >
+            <Text style={{ fontSize: 22, color: colors.headerText }}>⚙️</Text>
+          </TouchableOpacity>
+        </View>
       </View>
       <Text style={[styles.subtitle, { color: colors.headerText }]}>
         Climate donations on Stellar
