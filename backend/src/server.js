@@ -59,6 +59,8 @@ const {
 } = require("./services/webhookQueue");
 const { start: startPushQueue } = require("./services/pushQueue");
 const { startIndexer } = require("./services/indexerService");
+const { startReconciler, stopReconciler } = require("./services/indexerReconciler");
+const { startDLQWorker, stopDLQWorker } = require("./services/indexerDLQWorker");
 const lifecycle = require("./services/lifecycle");
 
 Sentry.init({
@@ -290,6 +292,22 @@ async function startServer() {
     ),
   );
 
+  // Start the reconciliation loop (every 30 min, checks ledger lag and auto-backfills)
+  startReconciler().catch((err) =>
+    logger.warn(
+      { event: "reconciler_startup_error", err: err.message },
+      "Indexer reconciler failed to start",
+    ),
+  );
+
+  // Start the DLQ worker (polls every 60s for failed donations to retry)
+  startDLQWorker().catch((err) =>
+    logger.warn(
+      { event: "dlq_worker_startup_error", err: err.message },
+      "Indexer DLQ worker failed to start",
+    ),
+  );
+
   // The Stellar Horizon stream in the indexer holds the event loop open.
   // Register a shutdown hook so the stream is closed cleanly on SIGTERM.
   lifecycle.onShutdown(async () => {
@@ -299,6 +317,14 @@ async function startServer() {
     } catch {
       // Indexer may already be stopped; swallow.
     }
+  });
+
+  lifecycle.onShutdown(async () => {
+    await stopReconciler();
+  });
+
+  lifecycle.onShutdown(async () => {
+    await stopDLQWorker();
   });
 
   // pg-boss queues: each one exposes a `stop()` method that drains in-flight
