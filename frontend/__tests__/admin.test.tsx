@@ -8,6 +8,12 @@ jest.mock("next/router", () => ({
   useRouter: () => ({ push: jest.fn(), query: {}, pathname: "/admin" }),
 }));
 
+const mockConnect = jest.fn();
+let mockPublicKey: string | null = null;
+jest.mock("@/lib/WalletProvider", () => ({
+  useWallet: () => ({ publicKey: mockPublicKey, connect: mockConnect }),
+}));
+
 const mockFetchProjects = jest.fn().mockResolvedValue([]);
 const mockFetchQueues = jest.fn().mockResolvedValue([
   {
@@ -51,12 +57,14 @@ describe("AdminIndex - Queue Monitoring", () => {
   });
 
   test("renders wallet connect when not connected", () => {
-    render(<AdminIndex publicKey={null} onConnect={jest.fn()} />);
+    mockPublicKey = null;
+    render(<AdminIndex />);
     expect(screen.getByText("Connect your wallet to manage projects.")).toBeTruthy();
   });
 
   test("renders queue list and controls when connected", async () => {
-    render(<AdminIndex publicKey="GADMINPUBLICKEY" onConnect={jest.fn()} />);
+    mockPublicKey = "GADMINPUBLICKEY";
+    render(<AdminIndex />);
 
     // Wait for queue metrics to render
     await waitFor(() => {
