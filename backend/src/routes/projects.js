@@ -6,9 +6,13 @@ const crypto = require("crypto");
 const express = require("express");
 const router = express.Router();
 const { v4: uuid } = require("uuid");
-const { z } = require("zod");
 const QRCode = require("qrcode");
 const pool = require("../db/pool");
+const { validate } = require("../middleware/validate");
+const {
+  stellarAddress,
+  uuid: uuidValidator,
+} = require("../validators/schemas");
 const { logAdminAction } = require("../services/audit");
 const {
   mapProjectRow,
@@ -26,7 +30,10 @@ const { enqueueAISummary } = require("../services/summaryQueue");
 const { Contract, TransactionBuilder } = require("@stellar/stellar-sdk");
 const redis = require("../services/redis");
 const { adminRequired } = require("../middleware/auth");
+// sanitizedStringField imported but unused — kept for future validation use
+// eslint-disable-next-line no-unused-vars
 const { sanitizedStringField } = require("../middleware/validation");
+const { AppError } = require("../errors");
 const { geocode } = require("../services/geocoder");
 const logger = require("../logger");
 
@@ -134,7 +141,7 @@ router.get("/featured", async (req, res, next) => {
     );
 
     if (!result.rows[0]) {
-      return res.status(404).json({ error: "No featured project found" });
+      throw new AppError("NO_FEATURED_PROJECT");
     }
 
     featuredCache = mapProjectRow(result.rows[0]);
@@ -228,6 +235,10 @@ router.get("/", async (req, res, next) => {
       status,
       verified,
       search,
+      location,
+      co2Min,
+      co2Max,
+      facets,
       limit = 20,
       cursor,
     } = req.query;
@@ -240,6 +251,10 @@ router.get("/", async (req, res, next) => {
         status,
         verified,
         search,
+        location,
+        co2Min,
+        co2Max,
+        facets,
         limit: pageSize,
         cursor: cursor || null,
       });
@@ -262,18 +277,83 @@ router.get("/", async (req, res, next) => {
     if (verified === "true") {
       where.push("verified = true");
     }
+
+    // Full-text search: `search_vector` (see migration 013_project_search) is
+    // matched via plainto_tsquery for relevance-ranked results, OR'd with the
+    // original ILIKE substring match so short fragments/typos that don't form
+    // a valid tsquery term still surface results.
+    let searchTsqueryIdx = null;
     if (search && typeof search === "string") {
+      values.push(search);
+      searchTsqueryIdx = values.length;
       values.push(`%${search}%`);
+      const ilikeIdx = values.length;
       where.push(`(
-        name ILIKE $${values.length}
-        OR description ILIKE $${values.length}
-        OR location ILIKE $${values.length}
+        search_vector @@ plainto_tsquery('english', $${searchTsqueryIdx})
+        OR name ILIKE $${ilikeIdx}
+        OR description ILIKE $${ilikeIdx}
+        OR location ILIKE $${ilikeIdx}
         OR EXISTS (
           SELECT 1
           FROM unnest(tags) AS tag
-          WHERE tag ILIKE $${values.length}
+          WHERE tag ILIKE $${ilikeIdx}
         )
       )`);
+    }
+
+    if (location && typeof location === "string") {
+      values.push(`%${location}%`);
+      where.push(`location ILIKE $${values.length}`);
+    }
+
+    if (co2Min !== undefined) {
+      const min = Number.parseInt(co2Min, 10);
+      if (Number.isFinite(min)) {
+        values.push(min);
+        where.push(`co2_offset_kg >= $${values.length}`);
+      }
+    }
+    if (co2Max !== undefined) {
+      const max = Number.parseInt(co2Max, 10);
+      if (Number.isFinite(max)) {
+        values.push(max);
+        where.push(`co2_offset_kg <= $${values.length}`);
+      }
+    }
+
+    // Facet counts reflect every filter above (category/status/verified/
+    // search/location/co2 range) but not pagination, so they're computed
+    // from a snapshot of `values`/`where` before the cursor clause (which is
+    // pagination-only) is appended below.
+    let facetsPayload;
+    if (facets === "true") {
+      const facetValues = [...values];
+      const facetWhereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+      const [categoryFacets, locationFacets, statusFacets] = await Promise.all([
+        pool.query(
+          `SELECT category AS value, COUNT(*)::int AS count
+             FROM projects ${facetWhereSql}
+            GROUP BY category ORDER BY count DESC`,
+          facetValues,
+        ),
+        pool.query(
+          `SELECT location AS value, COUNT(*)::int AS count
+             FROM projects ${facetWhereSql}
+            GROUP BY location ORDER BY count DESC LIMIT 20`,
+          facetValues,
+        ),
+        pool.query(
+          `SELECT status AS value, COUNT(*)::int AS count
+             FROM projects ${facetWhereSql}
+            GROUP BY status ORDER BY count DESC`,
+          facetValues,
+        ),
+      ]);
+      facetsPayload = {
+        category: categoryFacets.rows,
+        location: locationFacets.rows,
+        status: statusFacets.rows,
+      };
     }
 
     if (cursor) {
@@ -281,11 +361,11 @@ router.get("/", async (req, res, next) => {
       try {
         cursorData = JSON.parse(Buffer.from(cursor, "base64").toString("utf8"));
       } catch {
-        return res.status(400).json({ error: "Invalid cursor" });
+        throw new AppError("INVALID_CURSOR");
       }
       const { created_at, id } = cursorData;
       if (!created_at || !id) {
-        return res.status(400).json({ error: "Invalid cursor" });
+        throw new AppError("INVALID_CURSOR");
       }
       values.push(created_at, id);
       const caIdx = values.length - 1;
@@ -302,7 +382,14 @@ router.get("/", async (req, res, next) => {
     if (where.length) {
       query += "WHERE " + where.join(" AND ") + " ";
     }
-    query += `ORDER BY created_at DESC, id DESC LIMIT $${limitIdx}`;
+    // Rank by relevance when searching (only safe to reorder by rank when
+    // there's no keyset cursor in play, since keyset pagination requires a
+    // stable ORDER BY matching the cursor's inequality).
+    if (searchTsqueryIdx && !cursor) {
+      query += `ORDER BY ts_rank(search_vector, plainto_tsquery('english', $${searchTsqueryIdx})) DESC, created_at DESC, id DESC LIMIT $${limitIdx}`;
+    } else {
+      query += `ORDER BY created_at DESC, id DESC LIMIT $${limitIdx}`;
+    }
 
     // All user-controlled values (status, category, search, cursor fields) are
     // passed as parameterised $N placeholders in `values`. Dynamic WHERE clauses
@@ -326,6 +413,7 @@ router.get("/", async (req, res, next) => {
       data,
       next_cursor: nextCursor,
       has_more: hasMore,
+      ...(facetsPayload ? { facets: facetsPayload } : {}),
     };
     await redis.set(cacheKey, responseBody, PROJECTS_LIST_CACHE_TTL);
 
@@ -367,9 +455,10 @@ router.post("/", async (req, res, next) => {
       name.trim().length < 3 ||
       name.trim().length > 120
     ) {
-      return res
-        .status(400)
-        .json({ error: "name must be between 3 and 120 characters" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "name",
+        detail: "name must be between 3 and 120 characters",
+      });
     }
     if (
       !description ||
@@ -377,9 +466,10 @@ router.post("/", async (req, res, next) => {
       description.trim().length < 10 ||
       description.trim().length > 5000
     ) {
-      return res
-        .status(400)
-        .json({ error: "description must be between 10 and 5000 characters" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "description",
+        detail: "description must be between 10 and 5000 characters",
+      });
     }
     if (
       !location ||
@@ -387,17 +477,19 @@ router.post("/", async (req, res, next) => {
       location.trim().length < 2 ||
       location.trim().length > 200
     ) {
-      return res
-        .status(400)
-        .json({ error: "location must be between 2 and 200 characters" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "location",
+        detail: "location must be between 2 and 200 characters",
+      });
     }
     if (!category || !VALID_CATEGORIES.includes(category)) {
-      return res.status(400).json({
-        error: `category must be one of: ${VALID_CATEGORIES.join(", ")}`,
+      throw new AppError("VALIDATION_ERROR", {
+        field: "category",
+        detail: `category must be one of: ${VALID_CATEGORIES.join(", ")}`,
       });
     }
     if (!wallet_address || typeof wallet_address !== "string") {
-      return res.status(400).json({ error: "wallet_address is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "wallet_address" });
     }
 
     const id = uuid();
@@ -519,27 +611,34 @@ router.post("/:id/campaigns", async (req, res, next) => {
     const deadlineDate = new Date(deadline);
 
     if (trimmedTitle.length < 3 || trimmedTitle.length > 120) {
-      return res
-        .status(400)
-        .json({ error: "title must be between 3 and 120 characters" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "title",
+        detail: "title must be between 3 and 120 characters",
+      });
     }
     if (!Number.isFinite(goal) || goal <= 0) {
-      return res
-        .status(400)
-        .json({ error: "goalXLM must be a positive number" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "goalXLM",
+        detail: "goalXLM must be a positive number",
+      });
     }
     if (!deadline || Number.isNaN(deadlineDate.getTime())) {
-      return res
-        .status(400)
-        .json({ error: "deadline must be a valid ISO date string" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "deadline",
+        detail: "deadline must be a valid ISO date string",
+      });
     }
     if (deadlineDate.getTime() <= Date.now()) {
-      return res.status(400).json({ error: "deadline must be in the future" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "deadline",
+        detail: "deadline must be in the future",
+      });
     }
     if (trimmedDescription.length > 500) {
-      return res
-        .status(400)
-        .json({ error: "description must be 500 characters or fewer" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "description",
+        detail: "description must be 500 characters or fewer",
+      });
     }
 
     const projectResult = await pool.query(
@@ -547,7 +646,7 @@ router.post("/:id/campaigns", async (req, res, next) => {
       [req.params.id],
     );
     if (!projectResult.rows[0]) {
-      return res.status(404).json({ error: "Project not found" });
+      throw new AppError("PROJECT_NOT_FOUND");
     }
 
     const result = await pool.query(
@@ -603,7 +702,7 @@ router.get("/:id/campaigns", async (req, res, next) => {
       [req.params.id],
     );
     if (!projectResult.rows[0]) {
-      return res.status(404).json({ error: "Project not found" });
+      throw new AppError("PROJECT_NOT_FOUND");
     }
     const campaigns = await fetchCampaignsForProject(req.params.id);
     res.json({ success: true, data: campaigns });
@@ -660,9 +759,9 @@ router.post("/:id/milestones", async (req, res, next) => {
   try {
     const { title, percentage } = req.body;
     if (!title || typeof percentage !== "number") {
-      return res
-        .status(400)
-        .json({ error: "title and percentage (number) are required" });
+      throw new AppError("VALIDATION_ERROR", {
+        detail: "title and percentage (number) are required",
+      });
     }
     const result = await pool.query(
       `INSERT INTO project_milestones (id, project_id, title, percentage)
@@ -710,8 +809,7 @@ router.post("/:id/milestones/:milestoneId/reach", async (req, res, next) => {
        RETURNING *`,
       [transactionHash || null, req.params.milestoneId, req.params.id],
     );
-    if (!result.rows[0])
-      return res.status(404).json({ error: "Milestone not found" });
+    if (!result.rows[0]) throw new AppError("MILESTONE_NOT_FOUND");
 
     await redis.deletePattern(getProjectMilestonesCacheKey(req.params.id));
 
@@ -767,15 +865,18 @@ router.get("/admin/pending", async (req, res, next) => {
  * Builds a Soroban transaction to register a project on-chain.
  * Returns the XDR for the admin to sign.
  */
-router.post("/admin/register", adminRequired, async (req, res) => {
+router.post("/admin/register", adminRequired, async (req, res, next) => {
   try {
     const { projectId, name, wallet, co2PerXLM, adminAddress } = req.body;
 
-    if (!CONTRACT_ID) throw new Error("CONTRACT_ID not configured");
-    if (!adminAddress)
-      return res
-        .status(401)
-        .json({ success: false, error: "adminAddress is required" });
+    if (!CONTRACT_ID) {
+      throw new AppError("SERVICE_UNAVAILABLE", {
+        detail: "CONTRACT_ID not configured",
+      });
+    }
+    if (!adminAddress) {
+      throw new AppError("VALIDATION_ERROR", { field: "adminAddress" });
+    }
 
     const contract = new Contract(CONTRACT_ID);
     const sourceAccount = await server.loadAccount(adminAddress);
@@ -808,7 +909,7 @@ router.post("/admin/register", adminRequired, async (req, res) => {
 
     res.json({ success: true, xdr: tx.toXDR() });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    next(err);
   }
 });
 
@@ -816,12 +917,12 @@ router.post("/admin/register", adminRequired, async (req, res) => {
  * POST /api/projects/admin/confirm
  * Verifies a registration transaction and updates the local store.
  */
-router.post("/admin/confirm", adminRequired, async (req, res) => {
+router.post("/admin/confirm", adminRequired, async (req, res, next) => {
   try {
     const { transactionHash, projectId } = req.body;
 
     const tx = await server.getTransaction(transactionHash);
-    if (!tx.successful) throw new Error("Transaction failed");
+    if (!tx.successful) throw new AppError("TX_FAILED");
 
     const result = await pool.query(
       `UPDATE projects
@@ -847,7 +948,7 @@ router.post("/admin/confirm", adminRequired, async (req, res) => {
       data: result.rows[0] ? mapProjectRow(result.rows[0]) : null,
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    next(err);
   }
 });
 
@@ -868,7 +969,7 @@ router.get("/:id", async (req, res, next) => {
       [req.params.id],
     );
     if (!projectResult.rows[0])
-      return res.status(404).json({ error: "Project not found" });
+      throw new AppError("PROJECT_NOT_FOUND");
 
     const updatedAt = projectResult.rows[0].updated_at;
     const etag = `"${crypto.createHash("md5").update(String(updatedAt)).digest("hex")}"`;
@@ -964,7 +1065,7 @@ router.post("/:id/follow", async (req, res, next) => {
   try {
     const { walletAddress } = req.body || {};
     if (!walletAddress || typeof walletAddress !== "string") {
-      return res.status(400).json({ error: "walletAddress is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "walletAddress" });
     }
 
     const projectResult = await pool.query(
@@ -972,14 +1073,14 @@ router.post("/:id/follow", async (req, res, next) => {
       [req.params.id],
     );
     if (!projectResult.rows[0]) {
-      return res.status(404).json({ error: "Project not found" });
+      throw new AppError("PROJECT_NOT_FOUND");
     }
 
     // INSERT … ON CONFLICT DO NOTHING makes this idempotent.
     await pool.query(
       `INSERT INTO project_follows (project_id, wallet_address, created_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (project_id, wallet_address) DO NOTHING`,
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (project_id, wallet_address) DO NOTHING`,
       [req.params.id, walletAddress],
     );
 
@@ -998,7 +1099,8 @@ router.post("/:id/follow", async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+},
+);
 
 /**
  * DELETE /api/projects/:id/follow
@@ -1009,7 +1111,7 @@ router.delete("/:id/follow", async (req, res, next) => {
   try {
     const { walletAddress } = req.body || {};
     if (!walletAddress || typeof walletAddress !== "string") {
-      return res.status(400).json({ error: "walletAddress is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "walletAddress" });
     }
 
     const projectResult = await pool.query(
@@ -1017,7 +1119,7 @@ router.delete("/:id/follow", async (req, res, next) => {
       [req.params.id],
     );
     if (!projectResult.rows[0]) {
-      return res.status(404).json({ error: "Project not found" });
+      throw new AppError("PROJECT_NOT_FOUND");
     }
 
     await pool.query(
@@ -1040,7 +1142,8 @@ router.delete("/:id/follow", async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+},
+);
 
 /**
  * POST /api/projects/:id/generate-summary
@@ -1070,7 +1173,7 @@ router.post("/:id/generate-summary", async (req, res, next) => {
   try {
     const { adminAddress } = req.body || {};
     if (!adminAddress || typeof adminAddress !== "string") {
-      return res.status(400).json({ error: "adminAddress is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "adminAddress" });
     }
 
     const projectResult = await pool.query(
@@ -1078,11 +1181,11 @@ router.post("/:id/generate-summary", async (req, res, next) => {
       [req.params.id],
     );
     const project = projectResult.rows[0];
-    if (!project) return res.status(404).json({ error: "Project not found" });
+    if (!project) throw new AppError("PROJECT_NOT_FOUND");
     if (project.wallet_address !== adminAddress) {
-      return res
-        .status(403)
-        .json({ error: "Only the project owner can generate a summary" });
+      throw new AppError("FORBIDDEN", {
+        detail: "Only the project owner can generate a summary",
+      });
     }
 
     await enqueueAISummary(req.params.id, {
@@ -1122,27 +1225,35 @@ router.post("/:id/matching", async (req, res, next) => {
     const { matcherAddress, capXLM, multiplier, expiresAt } = req.body || {};
 
     if (!matcherAddress || typeof matcherAddress !== "string") {
-      return res.status(400).json({ error: "matcherAddress is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "matcherAddress" });
     }
     if (
       !capXLM ||
       isNaN(Number.parseFloat(capXLM)) ||
       Number.parseFloat(capXLM) <= 0
     ) {
-      return res
-        .status(400)
-        .json({ error: "capXLM must be a positive number" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "capXLM",
+        detail: "capXLM must be a positive number",
+      });
     }
     if (!multiplier || typeof multiplier !== "number" || multiplier < 1) {
-      return res.status(400).json({ error: "multiplier must be >= 1" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "multiplier",
+        detail: "multiplier must be >= 1",
+      });
     }
     if (!expiresAt || Number.isNaN(new Date(expiresAt).getTime())) {
-      return res
-        .status(400)
-        .json({ error: "expiresAt must be a valid ISO date string" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "expiresAt",
+        detail: "expiresAt must be a valid ISO date string",
+      });
     }
     if (new Date(expiresAt).getTime() <= Date.now()) {
-      return res.status(400).json({ error: "expiresAt must be in the future" });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "expiresAt",
+        detail: "expiresAt must be in the future",
+      });
     }
 
     const projectResult = await pool.query(
@@ -1150,7 +1261,7 @@ router.post("/:id/matching", async (req, res, next) => {
       [req.params.id],
     );
     if (!projectResult.rows[0]) {
-      return res.status(404).json({ error: "Project not found" });
+      throw new AppError("PROJECT_NOT_FOUND");
     }
 
     const result = await pool.query(
@@ -1255,9 +1366,10 @@ router.patch("/:id/status", async (req, res, next) => {
     const { status, reason, adminAddress } = req.body || {};
     const validStatuses = ["active", "rejected", "paused"];
     if (!status || !validStatuses.includes(status)) {
-      return res
-        .status(400)
-        .json({ error: `status must be one of: ${validStatuses.join(", ")}` });
+      throw new AppError("VALIDATION_ERROR", {
+        field: "status",
+        detail: `status must be one of: ${validStatuses.join(", ")}`,
+      });
     }
 
     const projectResult = await pool.query(
@@ -1265,7 +1377,7 @@ router.patch("/:id/status", async (req, res, next) => {
       [req.params.id],
     );
     if (!projectResult.rows[0]) {
-      return res.status(404).json({ error: "Project not found" });
+      throw new AppError("PROJECT_NOT_FOUND");
     }
 
     const result = await pool.query(
@@ -1306,12 +1418,10 @@ router.get("/:id/impact-certificate", async (req, res, next) => {
   try {
     const { donorAddress } = req.query;
     if (!donorAddress || typeof donorAddress !== "string") {
-      return res
-        .status(400)
-        .json({ error: "donorAddress query parameter is required" });
+      throw new AppError("VALIDATION_ERROR", { field: "donorAddress" });
     }
     if (!/^G[A-Z0-9]{55}$/.test(donorAddress)) {
-      return res.status(400).json({ error: "Invalid donorAddress format" });
+      throw new AppError("INVALID_ADDRESS", { field: "donorAddress" });
     }
 
     const projectResult = await pool.query(
@@ -1319,7 +1429,7 @@ router.get("/:id/impact-certificate", async (req, res, next) => {
       [req.params.id],
     );
     if (!projectResult.rows[0]) {
-      return res.status(404).json({ error: "Project not found" });
+      throw new AppError("PROJECT_NOT_FOUND");
     }
     const project = projectResult.rows[0];
 
@@ -1338,9 +1448,9 @@ router.get("/:id/impact-certificate", async (req, res, next) => {
       [req.params.id, donorAddress],
     );
     if (donationsResult.rows.length === 0) {
-      return res
-        .status(404)
-        .json({ error: "No donations found for this donor on this project" });
+      throw new AppError("DONATION_NOT_FOUND", {
+        detail: "No donations found for this donor on this project",
+      });
     }
 
     const donations = donationsResult.rows.map(mapDonationRow);
@@ -1415,7 +1525,7 @@ router.get("/:id/on-chain-donations", async (req, res, next) => {
       [req.params.id],
     );
     if (!projectResult.rows[0]) {
-      return res.status(404).json({ error: "Project not found" });
+      throw new AppError("PROJECT_NOT_FOUND");
     }
 
     const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
@@ -1453,7 +1563,8 @@ router.get("/:id/badge-holders", async (req, res, next) => {
     const uuidRegex =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!uuidRegex.test(projectId)) {
-      return res.status(404).json({ error: "Project not found" });
+      const err = new AppError("PROJECT_NOT_FOUND");
+      return res.status(400).json(err.toJSON());
     }
 
     const projectResult = await pool.query(
@@ -1461,7 +1572,7 @@ router.get("/:id/badge-holders", async (req, res, next) => {
       [projectId],
     );
     if (!projectResult.rows[0]) {
-      return res.status(404).json({ error: "Project not found" });
+      throw new AppError("PROJECT_NOT_FOUND");
     }
 
     const result = await pool.query(
