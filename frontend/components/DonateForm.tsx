@@ -16,6 +16,8 @@ import {
 } from "@/lib/stellar";
 import { signTransactionWithWallet } from "@/lib/wallet";
 import { recordDonation } from "@/lib/api";
+import useOnlineStatus from "@/hooks/useOnlineStatus";
+import { queueDonation, syncQueuedDonations } from "@/lib/offlineDonationQueue";
 import { formatXLM, formatCO2 } from "@/utils/format";
 import type { ClimateProject } from "@/utils/types";
 
@@ -56,6 +58,14 @@ export default function DonateForm({
   const [usdcBalance, setUsdcBalance] = useState<string | null>(null);
   const [trustlineMissing, setTrustlineMissing] = useState<boolean>(false);
   const [donorBadge, setDonorBadge] = useState<string | null>(null);
+  // DEX path-payment state
+  const [donorAssets, setDonorAssets] = useState<DonorAsset[]>([]);
+  const [selectedAsset, setSelectedAsset] = useState<DonorAsset | null>(null);
+  const [conversionEstimate, setConversionEstimate] =
+    useState<ConversionEstimate | null>(null);
+  const [conversionLoading, setConversionLoading] = useState(false);
+  const [conversionError, setConversionError] = useState<string | null>(null);
+  const isOnline = useOnlineStatus();
 
   useEffect(() => {
     if (!initialAmount) return;
@@ -121,6 +131,22 @@ export default function DonateForm({
     return "text-[#4F46E5]";
   };
 
+  useEffect(() => {
+    if (!isOnline) return;
+
+    void syncQueuedDonations(async (payload) => {
+      try {
+        await recordDonation({
+          ...payload,
+          transactionHash: payload.transactionHash || "queued-offline",
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }, [isOnline]);
+
   const handleDonate = async () => {
     if (!isValid || step !== "idle") return;
     setError(null);
@@ -128,6 +154,23 @@ export default function DonateForm({
     // Generate once per user-initiated attempt so retries caused by network
     // errors always send the same key and never create duplicate donations.
     const idempotencyKey = crypto.randomUUID();
+
+    if (!isOnline) {
+      await queueDonation({
+        projectId: project.id,
+        donorAddress: publicKey,
+        amount: amountNum.toString(),
+        currency,
+        message: message.trim() || undefined,
+        idempotencyKey,
+      });
+      setStep("success");
+      setTxHash(null);
+      setError(
+        "Your donation was queued while offline. It will be sent automatically once you reconnect.",
+      );
+      return;
+    }
 
     try {
       const useContract = CONTRACT_ID && currency === "XLM";
@@ -238,7 +281,23 @@ export default function DonateForm({
         onSuccess?.();
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "An error occurred");
+      const fallbackError =
+        err instanceof Error ? err.message : "An error occurred";
+      if (!navigator.onLine) {
+        await queueDonation({
+          projectId: project.id,
+          donorAddress: publicKey,
+          amount: amountNum.toString(),
+          currency,
+          message: message.trim() || undefined,
+          idempotencyKey,
+        });
+        setError("The donation could not be submitted right now, so it was queued for automatic retry.");
+        setStep("success");
+        setTxHash(null);
+        return;
+      }
+      setError(fallbackError);
       setStep("error");
       setTimeout(() => setStep("idle"), 3000);
     }
