@@ -56,7 +56,7 @@ fn test_freelancer_can_claim_after_release_period() {
 
     let job = client.get_job(&job_id).expect("Job should exist");
     assert_eq!(job.status, JobStatus::PartiallyReleased);
-    assert_eq!(env.balance(&freelancer, &token), 500i128);
+    assert_eq!(common::token_balance(&env, &token, &freelancer), 500i128);
 }
 
 #[test]
@@ -209,7 +209,7 @@ fn test_claim_all_milestones_completes_job() {
 
     let job = client.get_job(&job_id).expect("Job should exist");
     assert_eq!(job.status, JobStatus::Completed);
-    assert_eq!(env.balance(&freelancer, &token), 1000i128);
+    assert_eq!(common::token_balance(&env, &token, &freelancer), 1000i128);
 }
 
 #[test]

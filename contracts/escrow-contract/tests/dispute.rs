@@ -31,7 +31,15 @@ fn test_dispute_freezes_release() {
     common::fund(&env, &token, &client_addr, 1000i128);
     let job_id = SorobanString::from_str(&env, "job-dispute");
 
-    common::create_simple_job(&env, &client, &client_addr, &freelancer, &token, "job-dispute", 1000i128);
+    common::create_simple_job(
+        &env,
+        &client,
+        &client_addr,
+        &freelancer,
+        &token,
+        "job-dispute",
+        1000i128,
+    );
 
     // Dispute the job
     client.dispute_job(&admin, &job_id);
@@ -57,7 +65,15 @@ fn test_resolve_dispute_approve_remaining() {
     common::fund(&env, &token, &client_addr, 1000i128);
     let job_id = SorobanString::from_str(&env, "job-resolve-approve");
 
-    common::create_simple_job(&env, &client, &client_addr, &freelancer, &token, "job-resolve-approve", 1000i128);
+    common::create_simple_job(
+        &env,
+        &client,
+        &client_addr,
+        &freelancer,
+        &token,
+        "job-resolve-approve",
+        1000i128,
+    );
 
     // Dispute then resolve: approve remaining to freelancer
     client.dispute_job(&admin, &job_id);
@@ -68,8 +84,11 @@ fn test_resolve_dispute_approve_remaining() {
     assert!(!job.disputed);
 
     // Freelancer should have received the full 1000
-    let bal = env.balance(&freelancer, &token);
-    assert_eq!(bal, 1000i128, "Freelancer should receive all funds on approve resolution");
+    let bal = common::token_balance(&env, &token, &freelancer);
+    assert_eq!(
+        bal, 1000i128,
+        "Freelancer should receive all funds on approve resolution"
+    );
 }
 
 #[test]
@@ -120,9 +139,9 @@ fn test_resolve_dispute_refund_client() {
     assert!(!job.disputed);
 
     // Freelancer should have 500 (first milestone)
-    assert_eq!(env.balance(&freelancer, &token), 500i128);
+    assert_eq!(common::token_balance(&env, &token, &freelancer), 500i128);
     // Client should have 500 refunded
-    assert_eq!(env.balance(&client_addr, &token), 500i128);
+    assert_eq!(common::token_balance(&env, &token, &client_addr), 500i128);
 }
 
 #[test]
@@ -138,7 +157,15 @@ fn test_resolve_non_disputed_job_panics() {
     common::fund(&env, &token, &client_addr, 1000i128);
     let job_id = SorobanString::from_str(&env, "job-not-disputed");
 
-    common::create_simple_job(&env, &client, &client_addr, &freelancer, &token, "job-not-disputed", 1000i128);
+    common::create_simple_job(
+        &env,
+        &client,
+        &client_addr,
+        &freelancer,
+        &token,
+        "job-not-disputed",
+        1000i128,
+    );
 
     // Resolve without disputing first — should panic
     client.resolve_dispute(&admin, &job_id, &true);
@@ -157,7 +184,15 @@ fn test_non_admin_cannot_dispute() {
     common::fund(&env, &token, &client_addr, 1000i128);
     let job_id = SorobanString::from_str(&env, "job-bad-dispute");
 
-    common::create_simple_job(&env, &client, &client_addr, &freelancer, &token, "job-bad-dispute", 1000i128);
+    common::create_simple_job(
+        &env,
+        &client,
+        &client_addr,
+        &freelancer,
+        &token,
+        "job-bad-dispute",
+        1000i128,
+    );
 
     // A non-admin address tries to dispute
     client.dispute_job(&client_addr, &job_id);
@@ -176,7 +211,15 @@ fn test_non_admin_cannot_resolve() {
     common::fund(&env, &token, &client_addr, 1000i128);
     let job_id = SorobanString::from_str(&env, "job-bad-resolve");
 
-    common::create_simple_job(&env, &client, &client_addr, &freelancer, &token, "job-bad-resolve", 1000i128);
+    common::create_simple_job(
+        &env,
+        &client,
+        &client_addr,
+        &freelancer,
+        &token,
+        "job-bad-resolve",
+        1000i128,
+    );
 
     client.dispute_job(&admin, &job_id);
     // Non-admin tries to resolve

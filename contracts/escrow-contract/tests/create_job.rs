@@ -98,10 +98,26 @@ fn test_duplicate_job_id_panics() {
     common::fund(&env, &token, &client_addr, 2000i128);
 
     let job_id = SorobanString::from_str(&env, "dup-job");
-    common::create_simple_job(&env, &client, &client_addr, &freelancer, &token, "dup-job", 1000i128);
+    common::create_simple_job(
+        &env,
+        &client,
+        &client_addr,
+        &freelancer,
+        &token,
+        "dup-job",
+        1000i128,
+    );
 
     // Second creation with same job_id should panic
-    common::create_simple_job(&env, &client, &client_addr, &freelancer, &token, "dup-job", 1000i128);
+    common::create_simple_job(
+        &env,
+        &client,
+        &client_addr,
+        &freelancer,
+        &token,
+        "dup-job",
+        1000i128,
+    );
 }
 
 #[test]

@@ -6,7 +6,7 @@
 /// let (admin, client) = common::setup(&env);
 /// ```
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::token::StellarAssetClient;
+use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::{Address, Env, String as SorobanString, Vec};
 
 use escrow_contract::{EscrowContract, EscrowContractClient, Milestone};
@@ -59,6 +59,11 @@ pub fn create_simple_job(
         &amount,
         &milestones,
     );
+}
+
+/// Return the token balance for a given address.
+pub fn token_balance(env: &Env, token: &Address, owner: &Address) -> i128 {
+    TokenClient::new(env, token).balance(owner)
 }
 
 /// Build a three-milestone vector: 50 % + 30 % + 20 %

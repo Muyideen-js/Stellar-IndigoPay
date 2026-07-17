@@ -58,18 +58,27 @@ fn test_milestone_release_pays_proportional_amount() {
     // Release milestone 0 (50 %)
     client.release_milestone(&client_addr, &job_id, &0u32);
     // freelancer should have 500
-    let bal = env.balance(&freelancer, &token);
-    assert_eq!(bal, 500i128, "Freelancer should have 500 after first milestone");
+    let bal = common::token_balance(&env, &token, &freelancer);
+    assert_eq!(
+        bal, 500i128,
+        "Freelancer should have 500 after first milestone"
+    );
 
     // Release milestone 1 (30 %)
     client.release_milestone(&client_addr, &job_id, &1u32);
-    let bal = env.balance(&freelancer, &token);
-    assert_eq!(bal, 800i128, "Freelancer should have 800 after second milestone");
+    let bal = common::token_balance(&env, &token, &freelancer);
+    assert_eq!(
+        bal, 800i128,
+        "Freelancer should have 800 after second milestone"
+    );
 
     // Release milestone 2 (20 %) → 1000 total
     client.release_milestone(&client_addr, &job_id, &2u32);
-    let bal = env.balance(&freelancer, &token);
-    assert_eq!(bal, 1000i128, "Freelancer should have 1000 after all milestones");
+    let bal = common::token_balance(&env, &token, &freelancer);
+    assert_eq!(
+        bal, 1000i128,
+        "Freelancer should have 1000 after all milestones"
+    );
 }
 
 #[test]
@@ -93,10 +102,7 @@ fn test_partial_release_updates_status() {
         &1000i128,
         &milestones,
     );
-    assert_eq!(
-        client.get_job(&job_id).unwrap().status,
-        JobStatus::Escrowed
-    );
+    assert_eq!(client.get_job(&job_id).unwrap().status, JobStatus::Escrowed);
 
     // Release one milestone → status becomes PartiallyReleased
     client.release_milestone(&client_addr, &job_id, &0u32);
