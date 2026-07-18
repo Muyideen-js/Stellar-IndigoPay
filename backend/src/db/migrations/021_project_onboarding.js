@@ -1,50 +1,29 @@
+/**
+ * src/db/migrations/021_project_onboarding.js
+ * 
+ * Migration: Create project_onboarding table with onboarding checklist items.
+ * This table stores structured JSON with setup milestones for each project.
+ */
+
 "use strict";
 
 module.exports = {
-  name: "021_project_onboarding",
-
-  async up(client) {
-    await client.query(`
-      ALTER TABLE projects
-      ADD COLUMN IF NOT EXISTS verification_request_id UUID;
-    `);
-
-    await client.query(`
+  up: async (pool) => {
+    // Create project_onboarding table to track setup progress per project
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS project_onboarding (
-        project_id UUID PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
-        items JSONB NOT NULL,
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id UUID NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+        items JSONB NOT NULL DEFAULT '[]'::jsonb,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
-    `);
-
-    await client.query(`
-      CREATE OR REPLACE FUNCTION project_onboarding_updated_at()
-      RETURNS trigger AS $$
-      BEGIN
-        NEW.updated_at = NOW();
-        RETURN NEW;
-      END;
-      $$ LANGUAGE plpgsql;
-    `);
-
-    await client.query(`
-      DROP TRIGGER IF EXISTS project_onboarding_updated_at_trigger ON project_onboarding;
-      CREATE TRIGGER project_onboarding_updated_at_trigger
-      BEFORE UPDATE ON project_onboarding
-      FOR EACH ROW EXECUTE FUNCTION project_onboarding_updated_at();
+      CREATE INDEX IF NOT EXISTS idx_project_onboarding_project_id 
+        ON project_onboarding (project_id);
     `);
   },
 
-  async down(client) {
-    await client.query(`
-      DROP TRIGGER IF EXISTS project_onboarding_updated_at_trigger ON project_onboarding;
-    `);
-    await client.query(`
-      DROP FUNCTION IF EXISTS project_onboarding_updated_at();
-    `);
-    await client.query(`
-      DROP TABLE IF EXISTS project_onboarding;
-    `);
+  down: async (pool) => {
+    await pool.query(`DROP TABLE IF EXISTS project_onboarding CASCADE;`);
   },
 };
