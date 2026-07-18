@@ -20,6 +20,7 @@ describe("onboardingService", () => {
   test("onboardProject inserts project and onboarding data, then sends email", async () => {
     pool.query
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] });
 
     const verificationRequest = {
@@ -36,7 +37,7 @@ describe("onboardingService", () => {
 
     expect(result).toHaveProperty("projectId");
     expect(result).toHaveProperty("webhookSecret");
-    expect(pool.query).toHaveBeenCalledTimes(2);
+    expect(pool.query).toHaveBeenCalledTimes(3);
     expect(sendOnboardingEmail).toHaveBeenCalledTimes(1);
     expect(sendOnboardingEmail).toHaveBeenCalledWith(expect.objectContaining({
       to: verificationRequest.contactEmail,
