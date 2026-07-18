@@ -173,7 +173,12 @@ pub struct GlobalStats {
 
 #[contracttype]
 pub enum DataKey {
-    Admin,
+    // Multi-sig admin set: Vec<Address> of authorized admin addresses.
+    // Replaces the former single-admin `Admin` variant.
+    AdminSet,
+    // M-of-N threshold for critical operations. Must satisfy
+    // 1 <= threshold <= admin_set.len().
+    AdminThreshold,
     Project(String),
     ProjectIds,
     ProjectCount,
@@ -219,11 +224,10 @@ pub enum DataKey {
     // bulk operations (e.g. `deactivate_all_projects`) so they can
     // enumerate projects without external indexing.
     ProjectIdsAll,
-    // Pending admin for the two-step `transfer_admin` / `accept_admin`
-    // flow. Stored when the current admin calls `transfer_admin` and
-    // cleared either on `accept_admin` (promotion) or
-    // `cancel_admin_transfer`. Never holds an Address that's already
-    // the current admin.
+    // Pending admin transfer for the two-step `transfer_admin` /
+    // `accept_admin` flow. Stores `(old_admin, new_admin)` tuple.
+    // Set when M-of-N admins call `transfer_admin` and cleared on
+    // `accept_admin` (swap) or `cancel_admin_transfer`.
     PendingAdmin,
     // Contract-level pause flag. When true, every state-mutating
     // function (donate, donate_usdc, mint_*, governance create/vote,
@@ -274,19 +278,61 @@ const MAX_CO2_PER_XLM: u32 = 100_000;
 // off-chain channels) before the WASM is swapped.
 const UPGRADE_TIMELOCK_LEDGERS: u32 = 34_560;
 
-/// Read the stored admin. Caller must compare and panic on mismatch.
-/// Centralised so every admin check uses the same pattern.
-fn read_admin(env: &Env) -> Address {
+/// Read the stored admin set. Panics if not initialized.
+fn read_admin_set(env: &Env) -> Vec<Address> {
     env.storage()
         .instance()
-        .get(&DataKey::Admin)
+        .get(&DataKey::AdminSet)
         .expect("Not initialized")
 }
 
-/// Verify that `caller` is the stored admin. Used after `require_auth`
-/// so the auth signature has already been verified by the host.
-fn require_admin(env: &Env, caller: &Address) {
-    if read_admin(env) != *caller {
+/// Read the stored admin threshold. Panics if not initialized.
+fn read_admin_threshold(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::AdminThreshold)
+        .expect("Admin threshold not set")
+}
+
+/// Verify M-of-N threshold signatures for critical admin actions.
+///
+/// Iterates the supplied `signers` vec, calling `require_auth()` on each
+/// address (Soroban host-level cryptographic verification) and checking
+/// membership in the admin set. Duplicate signers are counted only once
+/// to prevent a single compromised key from satisfying the threshold by
+/// passing itself multiple times.
+fn verify_m_of_n(env: &Env, signers: &Vec<Address>, required_threshold: u32) {
+    let admin_set: Vec<Address> = read_admin_set(env);
+
+    let mut counted: Vec<Address> = Vec::new(env);
+    let mut valid_count: u32 = 0;
+    for signer in signers.iter() {
+        signer.require_auth();
+        if admin_set.contains(&signer) && !counted.contains(&signer) {
+            counted.push_back(signer.clone());
+            valid_count = valid_count.checked_add(1).expect("valid_count overflow");
+        }
+    }
+
+    if valid_count < required_threshold {
+        panic!(
+            "Insufficient admin signatures: {}/{} required",
+            valid_count, required_threshold
+        );
+    }
+}
+
+/// Require M-of-N admin signatures for critical operations.
+fn require_admin_for_critical(env: &Env, signers: &Vec<Address>) {
+    let threshold: u32 = read_admin_threshold(env);
+    verify_m_of_n(env, signers, threshold);
+}
+
+/// Require a single admin signature for routine operations.
+fn require_admin_for_routine(env: &Env, signer: &Address) {
+    signer.require_auth();
+    let admin_set: Vec<Address> = read_admin_set(env);
+    if !admin_set.contains(signer) {
         panic!("Only admin can perform this action");
     }
 }
@@ -349,11 +395,20 @@ impl IndigoPayContract {
     }
     // ─── Initialization ──────────────────────────────────────────────────────
 
-    pub fn initialize(env: Env, admin: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
+    pub fn initialize(env: Env, admins: Vec<Address>, threshold: u32) {
+        if env.storage().instance().has(&DataKey::AdminSet) {
             panic!("Contract already initialized");
         }
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        if admins.is_empty() {
+            panic!("Admin set must not be empty");
+        }
+        if threshold == 0 || threshold > admins.len() {
+            panic!("Threshold must be between 1 and the number of admins");
+        }
+        env.storage().instance().set(&DataKey::AdminSet, &admins);
+        env.storage()
+            .instance()
+            .set(&DataKey::AdminThreshold, &threshold);
         env.storage().instance().set(&DataKey::ProjectCount, &0u32);
         env.storage().instance().set(&DataKey::DonationCount, &0u32);
         env.storage()
@@ -375,8 +430,7 @@ impl IndigoPayContract {
         wallet: Address,
         co2_per_xlm: u32,
     ) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
         if env
             .storage()
@@ -429,8 +483,7 @@ impl IndigoPayContract {
     }
 
     pub fn batch_register_projects(env: Env, admin: Address, projects: Vec<ProjectInit>) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
 
         let mut ids: Vec<String> = env
@@ -483,9 +536,8 @@ impl IndigoPayContract {
     /// Iterates `DataKey::ProjectIdsAll` and flips `active=false`. Useful
     /// for incident response when the platform needs to halt all
     /// donations immediately.
-    pub fn deactivate_all_projects(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn deactivate_all_projects(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
         require_not_paused(&env);
 
         let ids: Vec<String> = env
@@ -509,13 +561,12 @@ impl IndigoPayContract {
         }
 
         env.events()
-            .publish((symbol_short!("deact_all"), admin), ids);
+            .publish((symbol_short!("deact_all"), signers.get(0).unwrap()), ids);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     pub fn deactivate_project(env: Env, admin: Address, project_id: String) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
         let mut project: Project = env
             .storage()
@@ -530,8 +581,7 @@ impl IndigoPayContract {
     }
 
     pub fn update_project_co2_rate(env: Env, admin: Address, project_id: String, co2_per_xlm: u32) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
 
         // Bounds must match `register_project` so the on-chain limits stay
@@ -564,8 +614,7 @@ impl IndigoPayContract {
     }
 
     pub fn pause_project(env: Env, admin: Address, project_id: String) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         // pause_project is intentionally NOT paused-gated so the admin can
         // still manage individual projects during a contract-wide pause.
         let mut project: Project = env
@@ -593,8 +642,7 @@ impl IndigoPayContract {
     /// for indexers, idempotency-aware (panics on resume when the
     /// project is not paused, to prevent accidental double-resumes).
     pub fn resume_project(env: Env, admin: Address, project_id: String) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         // resume_project is intentionally NOT paused-gated.
         let mut project: Project = env
             .storage()
@@ -1102,11 +1150,21 @@ impl IndigoPayContract {
             .expect("Donation record not found")
     }
 
+    /// Backward-compatible getter: returns the first admin in the set.
+    /// Prefer `get_admin_set()` for multi-sig contexts.
     pub fn get_admin(env: Env) -> Address {
-        env.storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized")
+        let admin_set: Vec<Address> = read_admin_set(&env);
+        admin_set.get(0).expect("Admin set is empty")
+    }
+
+    /// Returns the full admin set.
+    pub fn get_admin_set(env: Env) -> Vec<Address> {
+        read_admin_set(&env)
+    }
+
+    /// Returns the current M-of-N threshold for critical actions.
+    pub fn get_admin_threshold(env: Env) -> u32 {
+        read_admin_threshold(&env)
     }
 
     // ─── Placeholders ─────────────────────────────────────────────────────────
@@ -1228,9 +1286,13 @@ impl IndigoPayContract {
     /// ledgers (≈5 s each). Pass `0` to use the default 7-day window;
     /// any other value must be within
     /// [`MIN_VOTING_WINDOW_LEDGERS`, `MAX_VOTING_WINDOW_LEDGERS`].
-    pub fn create_proposal(env: Env, admin: Address, project_id: String, duration_ledgers: u32) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn create_proposal(
+        env: Env,
+        signers: Vec<Address>,
+        project_id: String,
+        duration_ledgers: u32,
+    ) {
+        require_admin_for_critical(&env, &signers);
         require_not_paused(&env);
         if !env
             .storage()
@@ -1274,8 +1336,10 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(project_id.clone()), &proposal);
-        env.events()
-            .publish((symbol_short!("prop_new"), admin), (project_id, window));
+        env.events().publish(
+            (symbol_short!("prop_new"), signers.get(0).unwrap()),
+            (project_id, window),
+        );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -1397,9 +1461,8 @@ impl IndigoPayContract {
     /// Admin-only immediate veto. Marks the proposal resolved & rejected.
     /// Required for incident response when a proposal is based on fraudulent data.
     /// Emits prop_veto with the admin address for auditability.
-    pub fn veto_proposal(env: Env, admin: Address, project_id: String) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn veto_proposal(env: Env, signers: Vec<Address>, project_id: String) {
+        require_admin_for_critical(&env, &signers);
         let mut proposal: VoteProposal = env
             .storage()
             .instance()
@@ -1409,8 +1472,10 @@ impl IndigoPayContract {
             panic!("Proposal already resolved");
         }
         proposal.resolved = true;
-        env.events()
-            .publish((symbol_short!("prop_veto"), admin), project_id.clone());
+        env.events().publish(
+            (symbol_short!("prop_veto"), signers.get(0).unwrap()),
+            project_id.clone(),
+        );
         env.storage()
             .instance()
             .set(&DataKey::Proposal(project_id), &proposal);
@@ -1618,8 +1683,7 @@ impl IndigoPayContract {
 
     /// Admin-only: Set the USDC token address for multi-currency donations.
     pub fn set_usdc_token(env: Env, admin: Address, usdc_token: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
         env.storage()
             .instance()
@@ -1641,8 +1705,7 @@ impl IndigoPayContract {
         max_donations: u32,
         window_ledgers: u32,
     ) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
         if max_donations == 0 {
             panic!("max_donations must be positive");
@@ -1680,8 +1743,7 @@ impl IndigoPayContract {
     /// Admin-only: Set the price oracle contract address used by `donate_usdc`.
     /// The oracle must implement `OracleInterface::get_price()`.
     pub fn set_oracle(env: Env, admin: Address, oracle: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+        require_admin_for_routine(&env, &admin);
         require_not_paused(&env);
         env.storage()
             .instance()
@@ -1702,57 +1764,149 @@ impl IndigoPayContract {
 
     // ─── Two-step admin transfer ─────────────────────────────────────────────
 
-    /// Admin-only: step 1 of a two-step admin transfer. Stores the proposed
-    /// new admin; the proposal becomes final when they call `accept_admin`.
+    /// Admin-only: step 1 of a two-step admin transfer. M-of-N admins
+    /// sign to propose swapping `old_admin` for `new_admin` in the admin
+    /// set. The swap is finalized when `new_admin` calls `accept_admin`.
+    /// The admin set size and threshold are preserved — this is an
+    /// in-place swap, not a dissolution of the multi-sig.
     /// Refuses to overwrite an existing pending transfer — the caller must
     /// `cancel_admin_transfer` first.
-    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn transfer_admin(env: Env, signers: Vec<Address>, old_admin: Address, new_admin: Address) {
+        require_admin_for_critical(&env, &signers);
         if env.storage().instance().has(&DataKey::PendingAdmin) {
             panic!("Admin transfer already pending; cancel first");
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingAdmin, &new_admin);
+        let admin_set: Vec<Address> = read_admin_set(&env);
+        if !admin_set.contains(&old_admin) {
+            panic!("old_admin is not in the admin set");
+        }
+        if admin_set.contains(&new_admin) {
+            panic!("new_admin is already an admin");
+        }
+        env.storage().instance().set(
+            &DataKey::PendingAdmin,
+            &(old_admin.clone(), new_admin.clone()),
+        );
         env.events()
-            .publish((symbol_short!("ad_xfer"), admin), new_admin);
+            .publish((symbol_short!("ad_xfer"), old_admin), new_admin);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
-    /// Step 2 of the two-step transfer. The caller must be the pending
-    /// admin recorded by a prior `transfer_admin`. On success the stored
-    /// admin is updated and the pending entry is cleared.
+    /// Step 2 of the two-step transfer. The caller must be the `new_admin`
+    /// recorded by a prior `transfer_admin`. On success `old_admin` is
+    /// replaced by `new_admin` in the admin set (in-place swap). Threshold
+    /// and set size are preserved.
     pub fn accept_admin(env: Env) {
-        let pending: Address = env
+        let (old_admin, new_admin): (Address, Address) = env
             .storage()
             .instance()
             .get(&DataKey::PendingAdmin)
             .expect("No pending admin transfer");
-        pending.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &pending);
+        new_admin.require_auth();
+
+        let admin_set: Vec<Address> = read_admin_set(&env);
+
+        if !admin_set.contains(&old_admin) {
+            panic!("old_admin no longer in admin set; transfer stale");
+        }
+        if admin_set.contains(&new_admin) {
+            panic!("new_admin already an admin; transfer stale");
+        }
+
+        let mut new_set: Vec<Address> = Vec::new(&env);
+        for addr in admin_set.iter() {
+            if addr == old_admin {
+                new_set.push_back(new_admin.clone());
+            } else {
+                new_set.push_back(addr);
+            }
+        }
+        env.storage().instance().set(&DataKey::AdminSet, &new_set);
         env.storage().instance().remove(&DataKey::PendingAdmin);
-        env.events().publish((symbol_short!("ad_acc"),), pending);
+        env.events().publish((symbol_short!("ad_acc"),), new_admin);
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
-    /// Admin-only: cancel a pending admin transfer without promoting anyone.
+    /// Admin-only: cancel a pending admin transfer without performing the swap.
     /// Useful when the proposed recipient lost their key or the transfer
     /// was a mistake.
-    pub fn cancel_admin_transfer(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn cancel_admin_transfer(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
         if !env.storage().instance().has(&DataKey::PendingAdmin) {
             panic!("No pending admin transfer");
         }
         env.storage().instance().remove(&DataKey::PendingAdmin);
-        env.events().publish((symbol_short!("ad_xfc"), admin), ());
+        env.events().publish((symbol_short!("ad_xfc"),), ());
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
-    /// Returns the proposed new admin if a transfer is pending, or `None`.
-    pub fn get_pending_admin(env: Env) -> Option<Address> {
+    /// Returns `(old_admin, new_admin)` if a transfer is pending, or `None`.
+    pub fn get_pending_admin(env: Env) -> Option<(Address, Address)> {
         env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    // ─── Admin set management ────────────────────────────────────────────────
+
+    /// M-of-N: add a new address to the admin set.
+    pub fn add_admin(env: Env, signers: Vec<Address>, new_admin: Address) {
+        require_admin_for_critical(&env, &signers);
+        let mut admin_set: Vec<Address> = read_admin_set(&env);
+        if admin_set.contains(&new_admin) {
+            panic!("Address is already an admin");
+        }
+        admin_set.push_back(new_admin.clone());
+        env.storage().instance().set(&DataKey::AdminSet, &admin_set);
+        env.events()
+            .publish((symbol_short!("admin_add"),), new_admin);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// M-of-N: remove an address from the admin set. Panics if this would
+    /// leave the set empty, or if the resulting set is smaller than the
+    /// current threshold (call `update_threshold` first).
+    pub fn remove_admin(env: Env, signers: Vec<Address>, admin_to_remove: Address) {
+        require_admin_for_critical(&env, &signers);
+        let admin_set: Vec<Address> = read_admin_set(&env);
+        if !admin_set.contains(&admin_to_remove) {
+            panic!("Address is not an admin");
+        }
+        if admin_set.len() <= 1 {
+            panic!("Cannot remove last admin");
+        }
+        let mut new_set: Vec<Address> = Vec::new(&env);
+        for addr in admin_set.iter() {
+            if addr != admin_to_remove {
+                new_set.push_back(addr);
+            }
+        }
+        let threshold: u32 = read_admin_threshold(&env);
+        if threshold > new_set.len() {
+            panic!(
+                "Threshold {} exceeds admin count {}; call update_threshold first",
+                threshold,
+                new_set.len()
+            );
+        }
+        env.storage().instance().set(&DataKey::AdminSet, &new_set);
+        env.events()
+            .publish((symbol_short!("admin_rmv"),), admin_to_remove);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
+    }
+
+    /// M-of-N: update the threshold for critical actions. Must satisfy
+    /// 1 <= new_threshold <= admin_set.len().
+    pub fn update_threshold(env: Env, signers: Vec<Address>, new_threshold: u32) {
+        require_admin_for_critical(&env, &signers);
+        let admin_set: Vec<Address> = read_admin_set(&env);
+        if new_threshold == 0 || new_threshold > admin_set.len() {
+            panic!("Threshold must be between 1 and the number of admins");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::AdminThreshold, &new_threshold);
+        env.events()
+            .publish((symbol_short!("thresh_up"),), new_threshold);
+        ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     // ─── Contract-level pause ─────────────────────────────────────────────────
@@ -1761,24 +1915,24 @@ impl IndigoPayContract {
     /// mutating function rejects with "Contract is paused". Read-only
     /// getters continue to work, and the admin can always call
     /// `unpause_contract` to recover.
-    pub fn pause_contract(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn pause_contract(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
         env.storage()
             .instance()
             .set(&DataKey::ContractPaused, &true);
-        env.events().publish((symbol_short!("paused"), admin), ());
+        env.events()
+            .publish((symbol_short!("paused"), signers.get(0).unwrap()), ());
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
     /// Admin-only: lift the contract-level pause.
-    pub fn unpause_contract(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn unpause_contract(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
         env.storage()
             .instance()
             .set(&DataKey::ContractPaused, &false);
-        env.events().publish((symbol_short!("unpause"), admin), ());
+        env.events()
+            .publish((symbol_short!("unpause"), signers.get(0).unwrap()), ());
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -1796,9 +1950,8 @@ impl IndigoPayContract {
     /// proposed WASM hash and the ledger sequence at which it becomes
     /// executable. Replaces any existing pending upgrade is not allowed;
     /// the caller must `cancel_upgrade` first.
-    pub fn propose_upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn propose_upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
+        require_admin_for_critical(&env, &signers);
         if env.storage().instance().has(&DataKey::PendingUpgrade) {
             panic!("Upgrade already pending; cancel first");
         }
@@ -1814,7 +1967,7 @@ impl IndigoPayContract {
             .instance()
             .set(&DataKey::UpgradeEffectiveAt, &effective_at);
         env.events().publish(
-            (symbol_short!("upg_prop"), admin),
+            (symbol_short!("upg_prop"), signers.get(0).unwrap()),
             (new_wasm_hash, effective_at),
         );
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
@@ -1860,9 +2013,8 @@ impl IndigoPayContract {
     /// Admin-only: cancel a pending upgrade without executing it. Use
     /// during incident response if the proposed WASM turns out to be
     /// malicious or buggy before the timelock elapses.
-    pub fn cancel_upgrade(env: Env, admin: Address) {
-        admin.require_auth();
-        require_admin(&env, &admin);
+    pub fn cancel_upgrade(env: Env, signers: Vec<Address>) {
+        require_admin_for_critical(&env, &signers);
         if !env.storage().instance().has(&DataKey::PendingUpgrade) {
             panic!("No pending upgrade");
         }
@@ -1870,7 +2022,8 @@ impl IndigoPayContract {
         env.storage()
             .instance()
             .remove(&DataKey::UpgradeEffectiveAt);
-        env.events().publish((symbol_short!("upg_cncl"), admin), ());
+        env.events()
+            .publish((symbol_short!("upg_cncl"), signers.get(0).unwrap()), ());
         ensure_min_ttl(&env, VOTING_WINDOW_LEDGERS * 4);
     }
 
@@ -1924,6 +2077,13 @@ mod tests {
     use soroban_sdk::token::StellarAssetClient;
     use soroban_sdk::{Address, BytesN, Env, String, Vec};
 
+    /// Helper: create a single-element signer Vec for admin calls.
+    fn signers1(env: &Env, a: &Address) -> Vec<Address> {
+        let mut v = Vec::new(env);
+        v.push_back(a.clone());
+        v
+    }
+
     // ─── Existing tests ───────────────────────────────────────────────────────
 
     #[test]
@@ -1932,8 +2092,10 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
         assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_admin_set().len(), 1);
+        assert_eq!(client.get_admin_threshold(), 1);
         assert_eq!(client.get_project_count(), 0);
         assert_eq!(client.get_donation_count(), 0);
         assert_eq!(client.get_global_total(), 0);
@@ -1968,7 +2130,7 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         let stats = client.get_global_stats();
         assert_eq!(stats.total_raised, 0);
@@ -1987,7 +2149,7 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         // Register a project (co2_per_xlm = 200 grams per XLM)
         let pid = String::from_str(&env, "proj-stats");
@@ -2031,8 +2193,8 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
+        client.initialize(&signers1(&env, &admin), &1u32);
     }
 
     #[test]
@@ -2041,7 +2203,7 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
         let donor = Address::generate(&env);
         assert_eq!(client.get_badge(&donor), BadgeTier::None);
     }
@@ -2067,7 +2229,7 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         let wallet1 = Address::generate(&env);
         let wallet2 = Address::generate(&env);
@@ -2114,7 +2276,7 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         let wallet = Address::generate(&env);
         let pid = String::from_str(&env, "proj-dup");
@@ -2150,7 +2312,7 @@ mod tests {
         let cid = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &cid);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
         let pid = String::from_str(&env, "proj-001");
         let wallet = Address::generate(&env);
         client.register_project(
@@ -2289,7 +2451,7 @@ mod tests {
     #[test]
     fn test_create_proposal() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let p = client.get_proposal(&pid);
         assert_eq!(p.votes_for, 0);
         assert_eq!(p.votes_against, 0);
@@ -2300,15 +2462,15 @@ mod tests {
     #[test]
     #[should_panic(expected = "Proposal already exists for this project")]
     fn test_create_duplicate_proposal_fails() {
-        let (_env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
-        client.create_proposal(&admin, &pid, &0u32);
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
     }
 
     #[test]
     fn test_cast_vote() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
         client.vote_verify_project(&voter, &pid, &true);
@@ -2321,7 +2483,7 @@ mod tests {
     #[should_panic(expected = "Only badge holders (Seedling or above) can vote")]
     fn test_non_badge_holder_cannot_vote() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let non_donor = Address::generate(&env);
         client.vote_verify_project(&non_donor, &pid, &true);
     }
@@ -2330,7 +2492,7 @@ mod tests {
     #[should_panic(expected = "Already voted on this proposal")]
     fn test_double_vote_prevented() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
         client.vote_verify_project(&voter, &pid, &true);
@@ -2340,7 +2502,7 @@ mod tests {
     #[test]
     fn test_resolve_proposal_approved() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         // 2 approve, 1 rejects
         for i in 0..3u32 {
             let voter = Address::generate(&env);
@@ -2359,7 +2521,7 @@ mod tests {
     #[test]
     fn test_resolve_proposal_rejected() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         // 1 approves, 2 reject
         for i in 0..3u32 {
             let voter = Address::generate(&env);
@@ -2378,7 +2540,7 @@ mod tests {
     #[test]
     fn test_resolve_proposal_tie_rejected_with_rejection_event() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
 
         for i in 0..2u32 {
             let voter = Address::generate(&env);
@@ -2405,8 +2567,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "Voting window not yet closed")]
     fn test_resolve_before_deadline_fails() {
-        let (_env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         client.resolve_proposal(&pid);
     }
 
@@ -2414,7 +2576,7 @@ mod tests {
     #[should_panic(expected = "Proposal already resolved")]
     fn test_double_resolve_fails() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         extend_ttl(&env, &cid);
         env.ledger().set_sequence_number(VOTING_WINDOW_LEDGERS + 2);
         client.resolve_proposal(&pid);
@@ -2426,20 +2588,20 @@ mod tests {
     #[test]
     fn test_veto_proposal() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         extend_ttl(&env, &cid);
-        client.veto_proposal(&admin, &pid);
+        client.veto_proposal(&signers1(&env, &admin), &pid);
         let p = client.get_proposal(&pid);
         assert!(p.resolved);
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
+    #[should_panic(expected = "Insufficient admin signatures")]
     fn test_veto_proposal_non_admin_fails() {
         let (env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let imposter = Address::generate(&env);
-        client.veto_proposal(&imposter, &pid);
+        client.veto_proposal(&signers1(&env, &imposter), &pid);
     }
 
     #[test]
@@ -2450,18 +2612,21 @@ mod tests {
         let cid = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &cid);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
-        client.veto_proposal(&admin, &String::from_str(&env, "nonexistent"));
+        client.initialize(&signers1(&env, &admin), &1u32);
+        client.veto_proposal(
+            &signers1(&env, &admin),
+            &String::from_str(&env, "nonexistent"),
+        );
     }
 
     #[test]
     #[should_panic(expected = "Proposal already resolved")]
     fn test_veto_proposal_double_veto_fails() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         extend_ttl(&env, &cid);
-        client.veto_proposal(&admin, &pid);
-        client.veto_proposal(&admin, &pid);
+        client.veto_proposal(&signers1(&env, &admin), &pid);
+        client.veto_proposal(&signers1(&env, &admin), &pid);
     }
 
     // ─── Configurable voting-duration tests ───────────────────────────────────
@@ -2472,7 +2637,7 @@ mod tests {
         let (env, _cid, client, admin, pid) = setup();
         let custom: u32 = 5_000;
         let start = env.ledger().sequence();
-        client.create_proposal(&admin, &pid, &custom);
+        client.create_proposal(&signers1(&env, &admin), &pid, &custom);
         let p = client.get_proposal(&pid);
         assert_eq!(p.deadline_ledger, start + custom);
     }
@@ -2482,7 +2647,7 @@ mod tests {
     fn test_create_proposal_zero_duration_uses_default() {
         let (env, _cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
         let p = client.get_proposal(&pid);
         assert_eq!(p.deadline_ledger, start + VOTING_WINDOW_LEDGERS);
     }
@@ -2490,15 +2655,23 @@ mod tests {
     #[test]
     #[should_panic(expected = "Voting duration too short")]
     fn test_create_proposal_rejects_too_short_duration() {
-        let (_env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &(MIN_VOTING_WINDOW_LEDGERS - 1));
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_proposal(
+            &signers1(&env, &admin),
+            &pid,
+            &(MIN_VOTING_WINDOW_LEDGERS - 1),
+        );
     }
 
     #[test]
     #[should_panic(expected = "Voting duration too long")]
     fn test_create_proposal_rejects_too_long_duration() {
-        let (_env, _cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &(MAX_VOTING_WINDOW_LEDGERS + 1));
+        let (env, _cid, client, admin, pid) = setup();
+        client.create_proposal(
+            &signers1(&env, &admin),
+            &pid,
+            &(MAX_VOTING_WINDOW_LEDGERS + 1),
+        );
     }
 
     #[test]
@@ -2532,7 +2705,7 @@ mod tests {
         assert!(client.get_project(&pid1).active);
         assert!(client.get_project(&pid2).active);
 
-        client.deactivate_all_projects(&admin);
+        client.deactivate_all_projects(&signers1(&env, &admin));
 
         assert!(!client.get_project(&pid1).active);
         assert!(!client.get_project(&pid2).active);
@@ -2543,7 +2716,7 @@ mod tests {
     #[should_panic(expected = "Voting window has closed")]
     fn test_vote_rejected_after_deadline() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
 
         // Create a voter with badge
         let voter = Address::generate(&env);
@@ -2562,7 +2735,7 @@ mod tests {
     fn test_vote_allowed_before_deadline() {
         let (env, cid, client, admin, pid) = setup();
         let start = env.ledger().sequence();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
 
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
@@ -2586,7 +2759,7 @@ mod tests {
         let custom_duration = MIN_VOTING_WINDOW_LEDGERS;
         let start = env.ledger().sequence();
 
-        client.create_proposal(&admin, &pid, &custom_duration);
+        client.create_proposal(&signers1(&env, &admin), &pid, &custom_duration);
 
         let voter = Address::generate(&env);
         grant_badge(&env, &cid, &voter);
@@ -2912,7 +3085,7 @@ mod tests {
     #[test]
     fn test_get_voter_list() {
         let (env, cid, client, admin, pid) = setup();
-        client.create_proposal(&admin, &pid, &0u32);
+        client.create_proposal(&signers1(&env, &admin), &pid, &0u32);
 
         let mut voters = std::vec::Vec::new();
         for _ in 0..3 {
@@ -2939,7 +3112,7 @@ mod tests {
         let cid = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &cid);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         // Initialize admin path + then ask for an unknown project.
         let pid = String::from_str(&env, "never-created");
@@ -2950,11 +3123,11 @@ mod tests {
     // ─── Bulk admin tests ──────────────────────────────────────────────────────
 
     #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
+    #[should_panic(expected = "Insufficient admin signatures")]
     fn test_deactivate_all_projects_non_admin_fails() {
         let (env, _cid, client, _admin, _pid) = setup();
         let imposter = Address::generate(&env);
-        client.deactivate_all_projects(&imposter);
+        client.deactivate_all_projects(&signers1(&env, &imposter));
     }
 
     // ─── Two-step admin transfer tests ─────────────────────────────────────
@@ -2972,7 +3145,7 @@ mod tests {
         let cid = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &cid);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
         (env, cid, client, admin)
     }
 
@@ -2981,30 +3154,35 @@ mod tests {
         let (env, _cid, client, admin) = setup_admin_only();
         let new_admin = Address::generate(&env);
 
-        client.transfer_admin(&admin, &new_admin);
-        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+        client.transfer_admin(&signers1(&env, &admin), &admin, &new_admin);
+        assert_eq!(
+            client.get_pending_admin(),
+            Some((admin.clone(), new_admin.clone()))
+        );
         // Stored admin does not change until accept_admin.
         assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_admin_set().len(), 1);
 
         client.accept_admin();
         assert_eq!(client.get_admin(), new_admin);
+        assert_eq!(client.get_admin_set().len(), 1);
+        assert_eq!(client.get_admin_threshold(), 1);
         assert_eq!(client.get_pending_admin(), None);
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
+    #[should_panic(expected = "Insufficient admin signatures")]
     fn test_two_step_admin_transfer_non_admin_cant_initiate() {
         let (env, _cid, client, _admin) = setup_admin_only();
         let imposter = Address::generate(&env);
         let new_admin = Address::generate(&env);
-        client.transfer_admin(&imposter, &new_admin);
+        client.transfer_admin(&signers1(&env, &imposter), &imposter, &new_admin);
     }
 
     #[test]
     #[should_panic(expected = "No pending admin transfer")]
     fn test_two_step_admin_transfer_accept_without_proposal_fails() {
         let (_env, _cid, client, _admin) = setup_admin_only();
-        // mock_all_auths is enabled, but no proposal exists.
         client.accept_admin();
     }
 
@@ -3014,8 +3192,8 @@ mod tests {
         let (env, _cid, client, admin) = setup_admin_only();
         let a = Address::generate(&env);
         let b = Address::generate(&env);
-        client.transfer_admin(&admin, &a);
-        client.transfer_admin(&admin, &b);
+        client.transfer_admin(&signers1(&env, &admin), &admin, &a);
+        client.transfer_admin(&signers1(&env, &admin), &admin, &b);
     }
 
     #[test]
@@ -3023,19 +3201,37 @@ mod tests {
         let (env, _cid, client, admin) = setup_admin_only();
         let new_admin = Address::generate(&env);
 
-        client.transfer_admin(&admin, &new_admin);
-        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
-        client.cancel_admin_transfer(&admin);
+        client.transfer_admin(&signers1(&env, &admin), &admin, &new_admin);
+        assert_eq!(
+            client.get_pending_admin(),
+            Some((admin.clone(), new_admin.clone()))
+        );
+        client.cancel_admin_transfer(&signers1(&env, &admin));
         assert_eq!(client.get_pending_admin(), None);
-        // Original admin is still the admin.
         assert_eq!(client.get_admin(), admin);
     }
 
     #[test]
     #[should_panic(expected = "No pending admin transfer")]
     fn test_two_step_admin_transfer_cancel_without_pending_fails() {
-        let (_env, _cid, client, admin) = setup_admin_only();
-        client.cancel_admin_transfer(&admin);
+        let (env, _cid, client, admin) = setup_admin_only();
+        client.cancel_admin_transfer(&signers1(&env, &admin));
+    }
+
+    #[test]
+    #[should_panic(expected = "old_admin is not in the admin set")]
+    fn test_transfer_admin_old_admin_not_in_set_panics() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        let outsider = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&signers1(&env, &admin), &outsider, &new_admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "new_admin is already an admin")]
+    fn test_transfer_admin_new_admin_already_in_set_panics() {
+        let (env, _cid, client, admin) = setup_admin_only();
+        client.transfer_admin(&signers1(&env, &admin), &admin, &admin);
     }
 
     // ─── Donation rate limit tests ────────────────────────────────────────────
@@ -3233,7 +3429,7 @@ mod tests {
             .address();
         soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&donor, &(10 * STROOP));
 
-        client.pause_contract(&client.get_admin());
+        client.pause_contract(&signers1(&env, &client.get_admin()));
         assert!(client.is_contract_paused());
 
         // A donate attempt must panic with the contract-level pause message.
@@ -3256,8 +3452,8 @@ mod tests {
             &100u32,
         );
 
-        client.pause_contract(&admin);
-        client.unpause_contract(&admin);
+        client.pause_contract(&signers1(&env, &admin));
+        client.unpause_contract(&signers1(&env, &admin));
         assert!(!client.is_contract_paused());
 
         let donor = Address::generate(&env);
@@ -3273,11 +3469,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
+    #[should_panic(expected = "Insufficient admin signatures")]
     fn test_pause_contract_non_admin_fails() {
         let (env, _cid, client, _admin) = setup_admin_only();
         let imposter = Address::generate(&env);
-        client.pause_contract(&imposter);
+        client.pause_contract(&signers1(&env, &imposter));
     }
 
     // ─── 48h upgrade timelock tests ─────────────────────────────────────────
@@ -3287,19 +3483,19 @@ mod tests {
         let (env, _cid, client, admin) = setup_admin_only();
         let fake_hash = BytesN::from_array(&env, &[7u8; 32]);
 
-        client.propose_upgrade(&admin, &fake_hash);
+        client.propose_upgrade(&signers1(&env, &admin), &fake_hash);
         let (h, eff) = client.get_pending_upgrade().expect("pending upgrade");
         assert_eq!(h, fake_hash);
         assert_eq!(eff, env.ledger().sequence() + UPGRADE_TIMELOCK_LEDGERS);
     }
 
     #[test]
-    #[should_panic(expected = "Only admin can perform this action")]
+    #[should_panic(expected = "Insufficient admin signatures")]
     fn test_propose_upgrade_non_admin_fails() {
         let (env, _cid, client, _admin) = setup_admin_only();
         let imposter = Address::generate(&env);
         let fake_hash = BytesN::from_array(&env, &[1u8; 32]);
-        client.propose_upgrade(&imposter, &fake_hash);
+        client.propose_upgrade(&signers1(&env, &imposter), &fake_hash);
     }
 
     #[test]
@@ -3308,8 +3504,8 @@ mod tests {
         let (env, _cid, client, admin) = setup_admin_only();
         let h1 = BytesN::from_array(&env, &[1u8; 32]);
         let h2 = BytesN::from_array(&env, &[2u8; 32]);
-        client.propose_upgrade(&admin, &h1);
-        client.propose_upgrade(&admin, &h2);
+        client.propose_upgrade(&signers1(&env, &admin), &h1);
+        client.propose_upgrade(&signers1(&env, &admin), &h2);
     }
 
     #[test]
@@ -3317,7 +3513,7 @@ mod tests {
     fn test_execute_upgrade_before_timelock_fails() {
         let (env, _cid, client, admin) = setup_admin_only();
         let fake_hash = BytesN::from_array(&env, &[3u8; 32]);
-        client.propose_upgrade(&admin, &fake_hash);
+        client.propose_upgrade(&signers1(&env, &admin), &fake_hash);
         // Still well before the effective ledger.
         client.execute_upgrade();
     }
@@ -3327,7 +3523,7 @@ mod tests {
         let (env, _cid, client, admin) = setup_admin_only();
         let fake_hash = BytesN::from_array(&env, &[4u8; 32]);
         let start = env.ledger().sequence();
-        client.propose_upgrade(&admin, &fake_hash);
+        client.propose_upgrade(&signers1(&env, &admin), &fake_hash);
 
         // Verify timelock state is recorded correctly (effective_at).
         let (hash, effective_at) = client.get_pending_upgrade().unwrap();
@@ -3338,7 +3534,7 @@ mod tests {
         // contract WASM to be uploaded first, which isn't available in the
         // unit-test host environment.  The timelock state machine is
         // covered by the assertions above and the cancel tests below.
-        client.cancel_upgrade(&admin);
+        client.cancel_upgrade(&signers1(&env, &admin));
         assert_eq!(client.get_pending_upgrade(), None);
     }
 
@@ -3346,9 +3542,9 @@ mod tests {
     fn test_cancel_upgrade_clears_pending() {
         let (env, _cid, client, admin) = setup_admin_only();
         let fake_hash = BytesN::from_array(&env, &[5u8; 32]);
-        client.propose_upgrade(&admin, &fake_hash);
+        client.propose_upgrade(&signers1(&env, &admin), &fake_hash);
         assert!(client.get_pending_upgrade().is_some());
-        client.cancel_upgrade(&admin);
+        client.cancel_upgrade(&signers1(&env, &admin));
         assert_eq!(client.get_pending_upgrade(), None);
         // last-executed is untouched because no upgrade was ever executed.
         assert_eq!(client.get_last_executed_upgrade(), None);
@@ -3364,8 +3560,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "No pending upgrade")]
     fn test_cancel_upgrade_without_pending_fails() {
-        let (_env, _cid, client, admin) = setup_admin_only();
-        client.cancel_upgrade(&admin);
+        let (env, _cid, client, admin) = setup_admin_only();
+        client.cancel_upgrade(&signers1(&env, &admin));
     }
 
     #[test]
@@ -3374,7 +3570,7 @@ mod tests {
         let id = env.register_contract(None, IndigoPayContract);
         let client = IndigoPayContractClient::new(&env, &id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&signers1(&env, &admin), &1u32);
 
         // Before extending, TTL should be some default (usually 100 in tests or determined by init).
         // The host env starts at ledger 0. We will use testutils to check the exact TTL.

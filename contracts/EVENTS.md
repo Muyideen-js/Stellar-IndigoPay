@@ -83,9 +83,9 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 **Description**: Emitted once when the contract is initialized.
 
-| Event Name             | Topics                     | Data                   | When Emitted                  |
-| ---------------------- | -------------------------- | ---------------------- | ----------------------------- |
-| `contract_initialized` | `["contract_initialized"]` | `{ "admin": Address }` | On contract deployment / init |
+| Event Name             | Topics                     | Data                                                | When Emitted                  |
+| ---------------------- | -------------------------- | --------------------------------------------------- | ----------------------------- |
+| `contract_initialized` | `["contract_initialized"]` | `{ "admins": Vec<Address>, "threshold": u32 }`      | On contract deployment / init |
 
 ---
 
@@ -99,6 +99,36 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 
 ---
 
+## 10. `admin_add`
+
+**Description**: Emitted when a new admin address is added to the multi-sig set.
+
+| Event Name  | Topics           | Data                   | When Emitted                  |
+| ----------- | ---------------- | ---------------------- | ----------------------------- |
+| `admin_add` | `["admin_add"]` | `{ "admin": Address }` | When M-of-N admins call `add_admin` |
+
+---
+
+## 11. `admin_rmv`
+
+**Description**: Emitted when an admin address is removed from the multi-sig set.
+
+| Event Name  | Topics           | Data                   | When Emitted                    |
+| ----------- | ---------------- | ---------------------- | ------------------------------- |
+| `admin_rmv` | `["admin_rmv"]` | `{ "admin": Address }` | When M-of-N admins call `remove_admin` |
+
+---
+
+## 12. `thresh_up`
+
+**Description**: Emitted when the multi-sig threshold is changed.
+
+| Event Name  | Topics           | Data                          | When Emitted                      |
+| ----------- | ---------------- | ----------------------------- | --------------------------------- |
+| `thresh_up` | `["thresh_up"]` | `{ "threshold": u32 }`        | When M-of-N admins call `update_threshold` |
+
+---
+
 ## Usage Notes
 
 - All events follow Soroban’s standard event format: `topics: Vec<Val>`, `data: Val`.
@@ -106,4 +136,4 @@ This document lists all events emitted by the Stellar IndigoPay Soroban smart co
 - Events can be queried via Horizon or Soroban RPC tools.
 - Frontend / backend should listen to these for real-time updates, notifications, and leaderboard.
 
-**Last Updated**: June 30, 2026
+**Last Updated**: July 17, 2026
