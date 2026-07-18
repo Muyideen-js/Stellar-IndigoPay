@@ -357,6 +357,16 @@ fn apply_campaign_goal_progress(project: &mut Project) -> bool {
     }
 }
 
+fn voting_weight_from_badge(badge: &BadgeTier) -> u32 {
+    match badge {
+        BadgeTier::None => 0,
+        BadgeTier::Seedling => 1,
+        BadgeTier::Tree => 3,
+        BadgeTier::Forest => 10,
+        BadgeTier::EarthGuardian => 25,
+    }
+}
+
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
