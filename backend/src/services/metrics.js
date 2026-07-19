@@ -147,6 +147,32 @@ const indexerLagSeconds = new client.Gauge({
   registers: [registry],
 });
 
+const indigopayIndexerLagLedgers = new client.Gauge({
+  name: "indigopay_indexer_lag_ledgers",
+  help: "Number of ledgers the indexer is behind the latest Horizon ledger.",
+  registers: [registry],
+});
+
+const indigopayIndexerAutoBackfillsTotal = new client.Counter({
+  name: "indigopay_indexer_auto_backfills_total",
+  help: "Total number of autonomous micro-backfills triggered by lag detection.",
+  labelNames: ["outcome"],
+  registers: [registry],
+});
+
+const indigopayIndexerStreamReconnectsTotal = new client.Counter({
+  name: "indigopay_indexer_stream_reconnects_total",
+  help: "Total number of SSE stream reconnections.",
+  registers: [registry],
+});
+
+const indexerOperationsSkippedTotal = new client.Counter({
+  name: "indexer_operations_skipped_total",
+  help: "Total number of operations skipped by the indexer.",
+  labelNames: ["reason"],
+  registers: [registry],
+});
+
 const indexerRunning = new client.Gauge({
   name: "indexer_running",
   help: "1 if the indexer polling loop is running, 0 otherwise.",
@@ -478,6 +504,10 @@ module.exports = {
     cacheCoalesced,
     queueJobsTotal,
     indexerLagSeconds,
+    indigopayIndexerLagLedgers,
+    indigopayIndexerAutoBackfillsTotal,
+    indigopayIndexerStreamReconnectsTotal,
+    indexerOperationsSkippedTotal,
     indexerRunning,
     secretRotationLastTimestamp,
     readinessCheckFailedTotal,
