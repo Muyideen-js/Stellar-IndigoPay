@@ -9,7 +9,8 @@ import { useState, useEffect } from "react";
 import {
   buildDonationTransaction,
   buildContractDonationTransaction,
-  buildPathPaymentTransaction,
+  buildCreateRecurringTransaction,
+  buildApproveTransaction,
   submitTransaction,
   explorerUrl,
   getXLMBalance,
@@ -18,6 +19,7 @@ import {
   hashMessage,
   CONTRACT_ID,
 } from "@/lib/stellar";
+import { Asset } from "@stellar/stellar-sdk";
 import { signTransactionWithWallet } from "@/lib/wallet";
 import { recordDonation } from "@/lib/api";
 import { useRecordDonation } from "@/hooks/queries";
@@ -49,6 +51,12 @@ type Step =
 const PRESETS_XLM = ["10", "25", "50", "100", "250"];
 const PRESETS_USDC = ["5", "10", "25", "50", "100"];
 
+const FREQUENCY_LEDGERS: Record<string, number> = {
+  weekly: 120960,
+  monthly: 518400,
+  quarterly: 1555200,
+};
+
 export default function DonateForm({
   project,
   publicKey,
@@ -59,6 +67,8 @@ export default function DonateForm({
   const [amount, setAmount] = useState("");
   const [message, setMessage] = useState("");
   const [currency, setCurrency] = useState<"XLM" | "USDC">("XLM");
+  const [isRecurring, setIsRecurring] = useState<boolean>(false);
+  const [frequency, setFrequency] = useState<"weekly" | "monthly" | "quarterly">("monthly");
   const [step, setStep] = useState<Step>("idle");
   const [error, setError] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
@@ -203,68 +213,79 @@ export default function DonateForm({
     });
 
     try {
-      // ── DEX Path-Payment Donation (non-XLM asset → XLM via DEX) ──────
-      if (selectedAsset && conversionEstimate) {
-        const sendAmount = amountNum.toFixed(7);
-        // Use 2% slippage tolerance for the destMin
-        const estimatedDest = parseFloat(conversionEstimate.estimatedXLM);
-        const destMin = (estimatedDest * 0.98).toFixed(7);
+      if (isRecurring) {
+        if (!CONTRACT_ID) {
+          throw new Error("Recurring donations require the smart contract to be configured.");
+        }
 
         setStep("building");
-        const tx = await buildPathPaymentTransaction({
-          fromPublicKey: publicKey,
-          toPublicKey: project.walletAddress,
-          sendAsset: {
-            code: selectedAsset.code,
-            issuer: selectedAsset.issuer,
-          },
-          sendAmount,
-          destMin,
-          path: conversionEstimate.path,
-          memo: message.trim() || undefined,
+        const nativeTokenAddress =
+          "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"; // Native XLM on testnet
+
+        const passphrase =
+          process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet"
+            ? "Public Global Stellar Network ; October 2015"
+            : "Test SDF Network ; September 2015";
+
+        const tokenAddress =
+          currency === "XLM"
+            ? nativeTokenAddress
+            : new Asset("USDC", process.env.NEXT_PUBLIC_USDC_ISSUER!).contractId(passphrase);
+
+        // 1. Approve allowance: (amount + 0.5 keeper incentive) * 12
+        const totalPerExecution = amountNum + 0.5;
+        const allowanceAmount = (totalPerExecution * 12).toFixed(7);
+
+        setStep("building");
+        const approveTx = await buildApproveTransaction({
+          tokenAddress,
+          user: publicKey,
+          spender: CONTRACT_ID,
+          amount: allowanceAmount,
         });
 
         setStep("signing");
-        const { signedXDR, error: signErr } = await signTransactionWithWallet(
-          tx.toXDR(),
-        );
-        if (signErr || !signedXDR) throw new Error(signErr || "Signing failed");
-
-        trackEvent("donation_signed", {
-          projectId: project.id,
-          amountXLM: sendAmount,
-        });
+        const { signedXDR: approveSigned, error: approveSignErr } =
+          await signTransactionWithWallet(approveTx.toXDR());
+        if (approveSignErr || !approveSigned) {
+          throw new Error(approveSignErr || "Token approval signature failed");
+        }
 
         setStep("submitting");
-        const result = await submitTransaction(signedXDR);
+        await submitTransaction(approveSigned);
+
+        // 2. Create recurring donation
+        setStep("building");
+        const msgHash = message.trim() ? hashMessage(message.trim()) : 0;
+        const intervalLedgers = FREQUENCY_LEDGERS[frequency] || 518400;
+
+        const createTx = await buildCreateRecurringTransaction({
+          contractId: CONTRACT_ID,
+          donor: publicKey,
+          projectId: project.id,
+          amount: amountNum.toFixed(7),
+          currency,
+          intervalLedgers,
+          keeperIncentive: "0.5000000",
+          msgHash,
+        });
+
+        setStep("signing");
+        const { signedXDR: createSigned, error: createSignErr } =
+          await signTransactionWithWallet(createTx.toXDR());
+        if (createSignErr || !createSigned) {
+          throw new Error(createSignErr || "Creation transaction signature failed");
+        }
+
+        setStep("submitting");
+        const result = await submitTransaction(createSigned);
         setTxHash(result.hash);
-
-        setStep("recording");
-        // Record in backend with conversion metadata
-        await recordDonation({
-          projectId: project.id,
-          donorAddress: publicKey,
-          amount: sendAmount,
-          currency: selectedAsset.code,
-          message: message.trim() || undefined,
-          transactionHash: result.hash,
-          sourceAsset: `${selectedAsset.code}:${selectedAsset.issuer}`,
-          conversionPath: conversionEstimate.path,
-          convertedAmountXLM: conversionEstimate.estimatedXLM,
-          idempotencyKey,
-        });
-
-        trackEvent("donation_confirmed", {
-          projectId: project.id,
-          amountXLM: sendAmount,
-        });
 
         setStep("success");
         onSuccess?.();
         return;
       }
 
-      // ── Contract Donation (XLM via smart contract) ────────────────────
       const useContract = CONTRACT_ID && currency === "XLM";
 
       if (useContract) {
@@ -603,6 +624,48 @@ export default function DonateForm({
         <p className={`text-xs mt-1 ${getCounterColor()}`}>
           {charCount} / 100 characters
         </p>
+
+        {/* Recurring Donation Checkbox */}
+        {CONTRACT_ID && (
+          <div className="p-4 bg-[rgba(99,102,241,0.04)] dark:bg-[rgba(129,140,248,0.06)] border border-[rgba(99,102,241,0.10)] dark:border-[rgba(129,140,248,0.12)] rounded-xl space-y-3">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={isRecurring}
+                onChange={(e) => setIsRecurring(e.target.checked)}
+                className="w-4 h-4 rounded text-[#4F46E5] focus:ring-[#4F46E5] border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800"
+              />
+              <span className="text-sm font-medium text-[#0F172A] dark:text-[#E2E8F0]">
+                Make this a recurring donation
+              </span>
+            </label>
+
+            {isRecurring && (
+              <div className="space-y-2 animate-fade-in pl-6 font-body">
+                <span className="label block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Frequency</span>
+                <div className="flex gap-2">
+                  {(["weekly", "monthly", "quarterly"] as const).map((freq) => (
+                    <button
+                      key={freq}
+                      type="button"
+                      onClick={() => setFrequency(freq)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold capitalize border transition-all ${
+                        frequency === freq
+                          ? "btn-primary text-white border-0"
+                          : "bg-white dark:bg-[#14142D] border-[rgba(99,102,241,0.15)] dark:border-[rgba(129,140,248,0.20)] text-[#475569] dark:text-[#94A3B8]"
+                      }`}
+                    >
+                      {freq}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-[#475569] dark:text-[#94A3B8] mt-2">
+                  Requires a one-time wallet approval signature for the total 1-year allowance, enabling trustless scheduling. A small keeper incentive (0.50 {currency}) is added per transaction to reward keepers.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {step === "error" && error && (

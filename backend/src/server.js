@@ -72,6 +72,8 @@ const { startDLQWorker, stopDLQWorker } = require("./services/indexerDLQWorker")
 const { stop: stopSorobanEvents } = require("./services/sorobanEventService");
 const lifecycle = require("./services/lifecycle");
 const guardianService = require("./services/guardian");
+const recurringKeeper = require("./services/recurringKeeper");
+
 
 
 Sentry.init({
@@ -533,6 +535,16 @@ async function startServer() {
     );
   }
 
+  try {
+    recurringKeeper.start();
+    logger.info({ event: "recurring_keeper_started" }, "Recurring keeper service started");
+  } catch (err) {
+    logger.error(
+      { event: "recurring_keeper_startup_error", err: err.message },
+      "Recurring keeper service failed to start",
+    );
+  }
+
   // The Stellar Horizon stream in the indexer holds the event loop open.
   // Register a shutdown hook so the stream is closed cleanly on SIGTERM.
   lifecycle.onShutdown(async () => {
@@ -550,6 +562,11 @@ async function startServer() {
     }
     try {
       if (typeof guardianService.stop === "function") guardianService.stop();
+    } catch {
+      // ignore
+    }
+    try {
+      if (typeof recurringKeeper.stop === "function") await recurringKeeper.stop();
     } catch {
       // ignore
     }

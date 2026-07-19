@@ -425,6 +425,45 @@ router.get(
     }
   });
 
+// GET /api/donations/recurring/:donorAddress - fetch recurring schedules for a donor
+router.get(
+  "/recurring/:donorAddress",
+  validate(z.object({ donorAddress: stellarAddress }), "params"),
+  async (req, res, next) => {
+    try {
+      const result = await pool.query(
+        `SELECT r.*, p.name AS project_name, p.wallet_address AS project_wallet
+         FROM recurring_donations r
+         JOIN projects p ON r.project_id = p.id
+         WHERE r.donor_address = $1
+         ORDER BY r.created_at DESC`,
+        [req.params.donorAddress]
+      );
+      res.json({
+        success: true,
+        data: result.rows.map((row) => ({
+          id: row.id,
+          donorAddress: row.donor_address,
+          recurringId: row.recurring_id,
+          projectId: row.project_id,
+          projectName: row.project_name,
+          projectWallet: row.project_wallet,
+          amount: parseFloat(row.amount),
+          currency: row.currency,
+          intervalSeconds: row.interval_seconds,
+          nextExecutionAt: row.next_execution_at.toISOString(),
+          keeperIncentive: parseFloat(row.keeper_incentive),
+          active: row.active,
+          createdAt: row.created_at.toISOString(),
+          updatedAt: row.updated_at.toISOString(),
+        })),
+      });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
 // GET /api/donations/:id - single donation fetch endpoint
 router.get("/:id", async (req, res, next) => {
   try {

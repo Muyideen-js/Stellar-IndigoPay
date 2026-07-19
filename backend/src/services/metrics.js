@@ -288,6 +288,22 @@ const postgresFailoverTotal = new client.Counter({
   registers: [registry],
 });
 
+// ── Recurring donation scheduler metrics ────────────────────────────────────
+
+const recurringExecutionsTotal = new client.Counter({
+  name: "indigopay_recurring_executions_total",
+  help: "Total recurring donation execution attempts, labelled by status.",
+  labelNames: ["status"], // success, failed
+  registers: [registry],
+});
+
+const recurringPending = new client.Gauge({
+  name: "indigopay_recurring_pending",
+  help: "Number of active recurring donation schedules pending execution.",
+  registers: [registry],
+});
+
+
 /**
  * Normalise an Express req.route.path / req.path to a low-cardinality
  * route label. We fall back to the literal path when no route is
@@ -481,5 +497,7 @@ module.exports = {
     pushSentTotal,
     pushLatencySeconds,
     postgresFailoverTotal,
+    recurringExecutionsTotal,
+    recurringPending,
   },
 };
