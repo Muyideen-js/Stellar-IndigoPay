@@ -10,13 +10,13 @@
 
 ### Features
 
-* **contracts:** Escrow contract event emission, partial milestone disputes, auto-refund on expiry, and job enumeration
-  - Emit events for all state-mutating functions: `job_creat`, `ms_rel`, `ms_claim`, `ms_disp`, `ms_reslv`, `job_refnd`, `job_disp`, `job_reslv`
-  - Per-milestone dispute: `dispute_milestone` and `resolve_milestone_dispute` allow disputing and resolving individual milestones without freezing non-disputed milestones
-  - Auto-refund on expiry: `refund_expired_job` enables client to claim a full refund after configurable job deadline if no milestones have been claimed
-  - Job enumeration: `get_job_count` and `get_job_ids` view functions added with `JobCount` and `JobIds` tracking
-  - 20 unit tests and end-to-end integration lifecycle test covering all state changes and edge cases
-
+* **frontend:** implement advanced keyboard navigation, global keyboard shortcuts, route focus management, and skip links
+  - Add `frontend/hooks/useShortcuts.ts` — custom keyboard shortcuts hook with modifier checking and input field exclusion
+  - Add `frontend/components/GlobalSearchModal.tsx` — search overlay modal accessible via Cmd+K / Ctrl+K with full keyboard navigation (arrows, Enter, Escape) and focus trap
+  - Update `frontend/pages/_app.tsx` to handle page focus management, global shortcuts, and App Shell layout (SkipToContent + Navbar wrapper)
+  - Update `frontend/components/DonateForm.tsx` to support Space/Enter keys on donation amount preset buttons
+  - Update `frontend/components/LanguageSwitcher.tsx` to prevent propagation of the Escape key
+  - Add Jest unit tests for `useShortcuts` hook in `frontend/hooks/__tests__/useShortcuts.test.ts`
 
 * **monitoring:** multi-window SLO burn-rate alerting with error budget dashboard (closes #240)
   - Defined SLOs: donation recording (99.5%) and project listing (99.9%) over 30-day rolling windows
@@ -208,6 +208,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [Unreleased]
+
+### Added
+- Comprehensive Soroban contract fuzzing harness with 7 property-based tests (#239)
+- ContractAction-based action-sequence fuzzing for holistic invariant checking
+- Fuzz corpus infrastructure with replayable regression tests
+- Property tests: donation totals consistency, badge monotonicity, donor count accuracy,
+  global stats consistency, vote integrity, CO₂ offset monotonicity, pause/resume idempotency
+- CI fuzz job with 60-second timeout and corpus regression step
+- FUZZ_FINDINGS.md documenting all discoveries from fuzz testing
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
