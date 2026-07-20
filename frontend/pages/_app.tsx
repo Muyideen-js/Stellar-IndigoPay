@@ -3,8 +3,10 @@ import type { AppProps } from "next/app";
 import Head from "next/head";
 import { useRouter } from "next/router";
 import { AnimatePresence } from "framer-motion";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import SkipToContent from "@/components/SkipToContent";
 import PageTransition from "@/components/PageTransition";
+import CookieConsent from "@/components/CookieConsent";
 import { ThemeTiedToaster } from "@/components/ThemeTiedToaster";
 import { ThemeProvider } from "@/lib/theme";
 import { I18nProvider } from "@/lib/i18n";
@@ -17,9 +19,8 @@ import OfflineFallback from "@/components/OfflineFallback";
 import InstallPrompt from "@/components/InstallPrompt";
 import { syncQueuedDonations } from "@/lib/offlineDonationQueue";
 import { recordDonation } from "@/lib/api";
-import Navbar from "@/components/Navbar";
-import GlobalSearchModal from "@/components/GlobalSearchModal";
-import { useShortcuts } from "@/hooks/useShortcuts";
+import { initAnalytics, trackEvent } from "@/lib/analytics";
+import { inter, display } from "@/lib/fonts";
 import "@/styles/globals.css";
 
 function AppContent({ Component, pageProps }: { Component: any; pageProps: any }) {
@@ -49,6 +50,34 @@ function AppContent({ Component, pageProps }: { Component: any; pageProps: any }
     router.events.on("routeChangeComplete", handleRouteChange);
     return () => router.events.off("routeChangeComplete", handleRouteChange);
   }, [router]);
+
+  // Create QueryClient once per session so cache survives page navigations.
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            staleTime: 30_000, // 30s default
+            retry: 2,
+            refetchOnWindowFocus: true,
+          },
+        },
+      }),
+  );
+
+  useEffect(() => {
+    initAnalytics();
+  }, []);
+
+  useEffect(() => {
+    const handleRouteChange = (url: string) => {
+      trackEvent("page_viewed", { url });
+    };
+    router.events.on("routeChangeComplete", handleRouteChange);
+    return () => {
+      router.events.off("routeChangeComplete", handleRouteChange);
+    };
+  }, [router.events]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
@@ -81,41 +110,13 @@ function AppContent({ Component, pageProps }: { Component: any; pageProps: any }
       window.removeEventListener("online", handleOnlineSync);
     };
   }, []);
-
-  const isWidget = router.pathname.startsWith("/widget");
-
-  return (
-    <>
-      <ConnectivityBanner isOnline={isOnline} />
-      {!isWidget && <SkipToContent />}
-      {!isWidget && (
-        <Navbar
-          publicKey={publicKey}
-          onConnect={connect}
-          onDisconnect={disconnect}
-        />
-      )}
-      <main id="main-content" tabIndex={-1} className="focus:outline-none">
-        <OfflineFallback isOnline={isOnline} />
-        <AnimatePresence mode="wait" initial={false}>
-          <PageTransition key={router.asPath}>
-            <Component {...pageProps} />
-          </PageTransition>
-        </AnimatePresence>
-      </main>
-      <InstallPrompt />
-      {searchOpen && <GlobalSearchModal onClose={() => setSearchOpen(false)} />}
-    </>
-  );
-}
-
-export default function App({ Component, pageProps }: AppProps) {
   return (
     <ErrorBoundary>
-      <ThemeProvider>
-        <I18nProvider>
-          <PriceProvider>
-            <WalletProvider>
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider>
+          <I18nProvider>
+            <PriceProvider>
+              <WalletProvider>
               <Head>
                 <title>
                   Stellar-IndigoPay — Fund the planet. One XLM at a time.
@@ -129,12 +130,35 @@ export default function App({ Component, pageProps }: AppProps) {
                   content="width=device-width, initial-scale=1"
                 />
               </Head>
-              <AppContent Component={Component} pageProps={pageProps} />
+              {/* Font variable injection — next/font injects CSS custom properties
+                  so Tailwind can reference them. Apply to the outermost wrapper
+                  consumed by the ThemeProvider's rendered div. */}
+              <div className={`${inter.variable} ${display.variable}`}>
+              <ConnectivityBanner isOnline={isOnline} />
+              <SkipToContent />
+              <main id="main-content" tabIndex={-1}>
+                <OfflineFallback isOnline={isOnline} />
+                {/* `initial={false}` prevents the entrance animation on the
+                    first SSR paint; `mode="wait"` lets the outgoing page
+                    finish exiting before the incoming one mounts, which keeps
+                    route changes smooth for both forward and back/forward
+                    navigations. Keying by `router.asPath` (including the
+                    query string) ensures dynamic routes animate too. */}
+                <AnimatePresence mode="wait" initial={false}>
+                  <PageTransition key={router.asPath}>
+                    <Component {...pageProps} />
+                  </PageTransition>
+                </AnimatePresence>
+              </main>
+              <CookieConsent />
+              <InstallPrompt />
               <ThemeTiedToaster />
-            </WalletProvider>
-          </PriceProvider>
-        </I18nProvider>
-      </ThemeProvider>
+              </div>
+              </WalletProvider>
+            </PriceProvider>
+          </I18nProvider>
+        </ThemeProvider>
+      </QueryClientProvider>
     </ErrorBoundary>
   );
 }
