@@ -4451,7 +4451,13 @@ mod tests {
     fn anonymous_counts_are_scoped_to_each_project() {
         let (env, _cid, client, admin, pid) = setup();
         let second = String::from_str(&env, "proj-002");
-        client.register_project(&admin, &second, &String::from_str(&env, "Second"), &Address::generate(&env), &100u32);
+        client.register_project(
+            &admin,
+            &second,
+            &String::from_str(&env, "Second"),
+            &Address::generate(&env),
+            &100u32,
+        );
         let donor = Address::generate(&env);
         let token = mint_native_for_test(&env, &donor, 20 * STROOP);
         client.donate_with_privacy(&token, &donor, &pid, &(10 * STROOP), &0u32, &true);
