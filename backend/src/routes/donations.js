@@ -24,8 +24,7 @@ const { enqueueProfileUpdate } = require("../services/profileQueue");
 const { enqueueImpactRecalc } = require("../services/impactQueue");
 const { enqueuePushNotification } = require("../services/pushQueue");
 const { server } = require("../services/stellar");
-const oracleService = require("../services/oracleService");
-const { generateReceiptPdf, hashReceiptContent, signReceipt } = require("../services/receiptGenerator");
+const { invalidateProjectRelatedCache } = require("../services/cacheManager");
 const donationLimiter = createRateLimiter(10, 1); // 10 requests per minute
 
 // Local EventEmitter used by both the POST /api/donations handler and the
@@ -305,6 +304,8 @@ async function recordDonation(req, res, next) {
         timestamp: new Date().toISOString(),
       });
     }
+
+    await invalidateProjectRelatedCache(projectId);
 
     const mappedDonation = mapDonationRow(donationResult.rows[0]);
     if (anonymous) mappedDonation.donorAddress = null;
